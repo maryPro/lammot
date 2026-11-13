@@ -1,0 +1,16 @@
+.git
+.gitignore
+venv
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+tests
+.env
+*.db
+*.db-wal
+*.db-shm
+*.patch
+cookies*.txt
+*.md
+!README.md
