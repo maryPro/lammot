@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>Lammot</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="wallpaper" id="wallpaper" aria-hidden="true"></div>
+
+  <div class="app" id="app">
+    <!-- Main screen: search + recent searches / results -->
+    <section class="screen" id="screen-home" aria-label="Search">
+      <div class="search-bar">
+        <div class="search-field">
+          <svg class="icon search-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+          <input id="search-input" type="text" inputmode="search" enterkeyhint="search"
+                 placeholder="Search music…" autocomplete="off" autocorrect="off"
+                 spellcheck="false" maxlength="200" aria-label="Search music">
+          <button class="icon-btn search-clear" id="search-clear" type="button" aria-label="Clear search" hidden>
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="screen-body" id="home-body"></div>
+    </section>
+
+    <!-- Settings / Favorites / Profile / Playlist / Shared playlist -->
+    <section class="screen" id="screen-view" hidden></section>
+  </div>
+
+  <!-- Mini player: only while a song is loaded -->
+  <div class="mini-player" id="mini-player" hidden>
+    <button class="mini-info" id="mini-open" type="button" aria-label="Open player">
+      <span class="thumb-wrap thumb-40"><img class="thumb" id="mini-thumb" alt=""></span>
+      <span class="mini-text">
+        <span class="mini-title" id="mini-title"></span>
+        <span class="mini-artist" id="mini-artist"></span>
+      </span>
+    </button>
+    <div class="mini-controls">
+      <button class="icon-btn" id="mini-prev" type="button" aria-label="Previous song">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 5.5v13l-9-6.5z" class="solid"/><path d="M6 5v14"/></svg>
+      </button>
+      <button class="icon-btn play-btn" id="mini-play" type="button" aria-label="Play">
+        <svg class="icon icon-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l11-6.5z" class="solid"/></svg>
+        <svg class="icon icon-pause" viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="5" width="4" height="14" rx="1" class="solid"/><rect x="13.5" y="5" width="4" height="14" rx="1" class="solid"/></svg>
+      </button>
+      <button class="icon-btn" id="mini-next" type="button" aria-label="Next song">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5.5v13l9-6.5z" class="solid"/><path d="M18 5v14"/></svg>
+      </button>
+    </div>
+    <div class="mini-progress" aria-hidden="true"><div class="mini-progress-bar" id="mini-progress"></div></div>
+  </div>
+
+  <!-- Bottom bar: Settings | Favorites | Profile -->
+  <nav class="tabbar" aria-label="Sections">
+    <button class="tab" type="button" data-tab="settings">
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg>
+      <span>Settings</span>
+    </button>
+    <button class="tab tab-primary" type="button" data-tab="favorites">
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.9l-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z"/></svg>
+      <span>Favorites</span>
+    </button>
+    <button class="tab" type="button" data-tab="profile">
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4.5 20c1.4-3.6 4.3-5.5 7.5-5.5s6.1 1.9 7.5 5.5"/></svg>
+      <span>Profile</span>
+    </button>
+  </nav>
+
+  <!-- Full-screen player -->
+  <div class="full-player" id="full-player" role="dialog" aria-modal="true" aria-label="Now playing" hidden>
+    <div class="fp-panel" id="fp-panel">
+      <div class="fp-top">
+        <span class="fp-grabber" aria-hidden="true"></span>
+        <button class="icon-btn" id="fp-close" type="button" aria-label="Close player">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+        </button>
+      </div>
+
+      <div class="fp-art-wrap">
+        <img class="fp-art" id="fp-art" alt="">
+      </div>
+
+      <div class="fp-meta">
+        <h1 class="fp-title" id="fp-title"></h1>
+        <p class="fp-artist" id="fp-artist"></p>
+      </div>
+
+      <div class="fp-timeline">
+        <input type="range" id="fp-seek" min="0" max="1000" value="0" step="1" aria-label="Seek">
+        <div class="fp-times"><span id="fp-elapsed">0:00</span><span id="fp-total">0:00</span></div>
+      </div>
+
+      <div class="fp-controls">
+        <button class="icon-btn fp-skip" id="fp-prev" type="button" aria-label="Previous song">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 5.5v13l-9-6.5z" class="solid"/><path d="M6 5v14"/></svg>
+        </button>
+        <button class="fp-play" id="fp-play" type="button" aria-label="Play">
+          <svg class="icon icon-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l11-6.5z" class="solid"/></svg>
+          <svg class="icon icon-pause" viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="5" width="4" height="14" rx="1" class="solid"/><rect x="13.5" y="5" width="4" height="14" rx="1" class="solid"/></svg>
+        </button>
+        <button class="icon-btn fp-skip" id="fp-next" type="button" aria-label="Next song">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5.5v13l9-6.5z" class="solid"/><path d="M18 5v14"/></svg>
+        </button>
+      </div>
+
+      <section class="fp-queue" aria-labelledby="fp-queue-title">
+        <div class="fp-queue-head">
+          <h2 id="fp-queue-title">Up next</h2>
+          <span class="fp-source" id="fp-source"></span>
+        </div>
+        <ol class="queue-list" id="fp-queue"></ol>
+      </section>
+    </div>
+  </div>
+
+  <div class="sheet-backdrop" id="sheet" hidden></div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <audio id="audio" preload="auto"></audio>
+</body>
+</html>

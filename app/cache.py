@@ -84,6 +84,11 @@ def cache_set(key: str, value: str, ttl: float = 7200.0) -> None:
     _cache[key] = (value, time.time() + ttl)
 
 
+def cache_delete(key: str) -> None:
+    """Remove one entry (no error if it is not there)."""
+    _cache.pop(key, None)
+
+
 def cache_clear() -> None:
     """Remove all entries from the cache.  Useful in tests."""
     _cache.clear()
