@@ -27,7 +27,6 @@
   const DEFAULT_ACCENT = '#BC13FE';
   const SEARCH_DEBOUNCE_MS = 300;
   const SEARCH_MIN_CHARS = 2;
-  const SEARCH_PREFETCH_COUNT = 3;  // warm the first results while the user decides
   const QUEUE_VISIBLE = 5;
   const PREFETCH_SECONDS = 15;     // resolve the next song this long before the end
   const RADIO_BATCH = 5;
@@ -224,10 +223,15 @@
   let initData = '';
 
   class ApiError extends Error {
-    constructor(status, message) { super(message); this.status = status; }
+    constructor(status, message, code) {
+      super(message);
+      this.status = status;
+      this.code = code;
+    }
   }
 
-  function errorMessage(status, detail) {
+  function errorMessage(status, detail, code) {
+    if (code === 'bot_check') return 'Music service is temporarily unavailable. Please try again later.';
     if (status === 401) return 'Your session has expired. Close Lammot and open it again from the bot.';
     if (status === 429) return 'Too many requests. Wait a minute and try again.';
     if (status === 404 && detail) return detail;
@@ -256,7 +260,8 @@
     try { payload = await res.json(); } catch (_) { /* empty body */ }
     if (!res.ok) {
       const detail = payload && typeof payload.detail === 'string' ? payload.detail : '';
-      throw new ApiError(res.status, errorMessage(res.status, detail));
+      const code = payload && typeof payload.code === 'string' ? payload.code : '';
+      throw new ApiError(res.status, errorMessage(res.status, detail, code), code);
     }
     return payload ? payload.data : null;
   }
@@ -607,7 +612,6 @@
       const results = await api(`/api/search?q=${encodeURIComponent(q)}&limit=20`, { signal: searchController.signal });
       if (seq !== searchSeq) return;
       state.search = { q, status: 'done', results: results || [], error: '' };
-      prefetchSearchResults(results);
     } catch (err) {
       if (err && err.name === 'AbortError') return;
       if (seq !== searchSeq) return;
@@ -1085,6 +1089,7 @@
     triedFallback: false,
     failedInRow: 0,
     prefetchedFor: null,
+    botCheck: false,
     loading: false,
     seeking: false,
   };
@@ -1109,14 +1114,10 @@
   }
 
   function prefetchTrack(track, format = AUDIO_FORMAT) {
-    if (!track || !track.video_id) return;
+    if (!track || !track.video_id || player.botCheck) return;
     const cached = player.links.get(`${track.video_id}:${format}`);
     if (cached && cached.expires > Date.now()) return;
     streamLink(track, format).catch(() => {});
-  }
-
-  function prefetchSearchResults(results) {
-    (results || []).slice(0, SEARCH_PREFETCH_COUNT).forEach((track) => prefetchTrack(track));
   }
 
   function setLoading(on) {
@@ -1148,6 +1149,7 @@
       audio.src = url;
       await audio.play();
       player.failedInRow = 0;
+      player.botCheck = false;
     } catch (err) {
       if (seq !== player.loadSeq) return;
       if (err && err.name === 'NotAllowedError') {
@@ -1156,7 +1158,7 @@
       } else if (err && err.name === 'AbortError') {
         // A newer track replaced this one
       } else if (err instanceof ApiError) {
-        handleTrackFailure(seq, err.message);
+        handleTrackFailure(seq, err.message, err.code);
       }
       // Media decode/network errors arrive via the 'error' event
     } finally {
@@ -1165,7 +1167,15 @@
     refillRadio(false);
   }
 
-  function handleTrackFailure(seq, message) {
+  function handleTrackFailure(seq, message, code) {
+    if (code === 'bot_check') {
+      player.botCheck = true;
+      player.failedInRow = 0;
+      try { audio.pause(); } catch (_) { /* ignore */ }
+      toast('Music service is temporarily unavailable. Please try again later.');
+      return;
+    }
+    player.botCheck = false;
     player.failedInRow += 1;
     if (player.failedInRow >= MAX_FAILED_IN_ROW) {
       toast('Playback stopped: several songs in a row could not be loaded.');
@@ -1193,7 +1203,13 @@
         if (at) audio.currentTime = at;
         await audio.play();
         return;
-      } catch (_) { /* fall through to skip */ }
+      } catch (err) {
+        if (err instanceof ApiError && err.code === 'bot_check') {
+          handleTrackFailure(seq, err.message, err.code);
+          return;
+        }
+        /* fall through to skip */
+      }
     }
     if (seq === player.loadSeq) handleTrackFailure(seq);
   }
@@ -1539,7 +1555,7 @@
       renderProgress(audio.currentTime, duration);
       // Lazy resolve: get the next song's link ~15 s before this one ends
       const upcoming = player.queue[0];
-      if (upcoming && duration > 0 && duration - audio.currentTime < PREFETCH_SECONDS
+      if (upcoming && !player.botCheck && duration > 0 && duration - audio.currentTime < PREFETCH_SECONDS
           && player.prefetchedFor !== upcoming.video_id) {
         player.prefetchedFor = upcoming.video_id;
         streamLink(upcoming, AUDIO_FORMAT).catch(() => {});
