@@ -14,6 +14,17 @@ os.environ.setdefault("BOT_TOKEN", "test-only-bot-token")
 os.environ["PUBLIC_URL"] = ""
 
 
+@pytest.fixture(autouse=True)
+def reset_resolver_state():
+    """Keep the in-memory bot-check gate from leaking between tests."""
+    from app import resolver
+
+    resolver.reset_state()
+    resolver.set_active_account("primary")
+    yield
+    resolver.reset_state()
+
+
 @pytest.fixture
 async def temp_db(tmp_path, monkeypatch):
     """A fresh SQLite file per test; the real lammot.db is never touched."""

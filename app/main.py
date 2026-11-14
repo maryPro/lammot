@@ -14,10 +14,12 @@ Rules:
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import logging
 import os
 import re
+import tempfile
 import time
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
@@ -28,7 +30,7 @@ import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -85,6 +87,32 @@ RADIO_HISTORY = 50        # radio skips the user's last 50 played tracks
 MAX_PLAYLISTS = 100       # per user
 AUDIO_LINK_TTL = 6 * 3600  # signed /audio links live 6 hours
 
+# Resolver canary / cookie replacement
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+CANARY_INTERVAL_SECONDS = max(60, _env_int("CANARY_INTERVAL_SECONDS", 900))
+CANARY_START_DELAY_SECONDS = max(1, _env_int("CANARY_START_DELAY_SECONDS", 15))
+COOKIE_TEST_TIMEOUT_SECONDS = max(5.0, _env_float("COOKIE_TEST_TIMEOUT_SECONDS", 45.0))
+COOKIES_MAX_BYTES = 100 * 1024
+
+# Alert only on meaningful transitions, never once per failed track.
+_alert_lock = asyncio.Lock()
+_last_alert_seq = 0
+_last_alert_status = "unknown"
+_last_alert_account = "primary"
+
 AUDIO_KEY = auth.derive_key(BOT_TOKEN, b"lammot-audio")
 WEBHOOK_SECRET = bot.webhook_secret(BOT_TOKEN)
 
@@ -112,6 +140,127 @@ def _get_http() -> httpx.AsyncClient:
     return _http_client
 
 
+def _owner_tg_id() -> Optional[int]:
+    raw = os.getenv("OWNER_TG_ID", "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("OWNER_TG_ID is not an integer; owner commands and alerts are disabled")
+        return None
+
+
+def _canary_video_ids() -> List[str]:
+    raw = os.getenv("CANARY_VIDEO_IDS", "")
+    ids = [v.strip() for v in raw.split(",") if _VIDEO_ID_RE.match(v.strip())]
+    return ids[:5]
+
+
+def _cookie_path(target: str) -> str:
+    env = "YTDLP_COOKIES_FILE" if target == "primary" else "YTDLP_RESERVE_COOKIES_FILE"
+    return os.getenv(env, "").strip()
+
+
+async def _send_owner_message(text: str) -> None:
+    owner = _owner_tg_id()
+    if owner is None:
+        return
+    try:
+        await bot.call(_get_http(), BOT_TOKEN, "sendMessage", {
+            "chat_id": owner,
+            "text": text,
+            "disable_web_page_preview": True,
+        })
+    except bot.TelegramError as exc:
+        logger.warning("Owner alert failed: %s", exc)
+
+
+async def _alert_on_transition() -> None:
+    """Send at most one Telegram alert per meaningful state transition."""
+    global _last_alert_seq, _last_alert_status, _last_alert_account
+    async with _alert_lock:
+        state = resolver.get_state()
+        seq = int(state.get("transition_seq") or 0)
+        status = str(state.get("status") or "unknown")
+        account = str(state.get("active_account") or "primary")
+        if seq == _last_alert_seq:
+            return
+        _last_alert_seq = seq
+
+        text = ""
+        if account != _last_alert_account:
+            text = f"Resolver switched to the {account} cookies account."
+        elif status == "bot_check" and _last_alert_status != "bot_check":
+            text = (
+                "YouTube bot-check: cookies are not working. "
+                "Upload a fresh cookies.txt with /cookies."
+            )
+        elif status == "ok" and _last_alert_status == "bot_check":
+            text = "Resolver is working again."
+        elif status == "degraded" and _last_alert_status == "ok":
+            text = "Resolver is degraded: some tracks cannot be resolved right now."
+
+        _last_alert_status = status
+        _last_alert_account = account
+        if text:
+            await _send_owner_message(text)
+
+
+def _resolver_status_from(results: List[str]) -> str:
+    if any(r == "ok" for r in results):
+        return "ok"
+    if results and all(r == "bot_check" for r in results):
+        return "bot_check"
+    return "degraded"
+
+
+async def _run_canary_once() -> None:
+    video_ids = _canary_video_ids()
+    if not video_ids:
+        return
+    results: List[str] = []
+    for video_id in video_ids:
+        try:
+            await run_in_threadpool(resolver.get_stream_url, video_id, "opus", True)
+            results.append("ok")
+        except resolver.BotCheckError:
+            results.append("bot_check")
+        except resolver.TransientResolveError:
+            results.append("transient")
+        except Exception:
+            results.append("other")
+    status = _resolver_status_from(results)
+    if status == "ok":
+        resolver.set_status("ok", reason="canary_ok")
+    elif status == "bot_check":
+        resolver.set_status("bot_check", reason="canary_bot_check")
+    else:
+        resolver.set_status("degraded", reason="canary_degraded")
+    await _alert_on_transition()
+
+
+async def _canary_loop() -> None:
+    await asyncio.sleep(CANARY_START_DELAY_SECONDS)
+    while True:
+        try:
+            await _run_canary_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Canary check failed")
+        await asyncio.sleep(CANARY_INTERVAL_SECONDS)
+
+
+async def _stats_loop() -> None:
+    while True:
+        try:
+            await asyncio.sleep(3600)
+            logger.info("Resolver stats: %s", resolver.stats_snapshot(reset=True))
+        except asyncio.CancelledError:
+            raise
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     global _bot_username, _http_client
@@ -127,9 +276,28 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     else:
         logger.warning("PUBLIC_URL is not set: webhook not configured, /start will not answer")
 
+    cache_dir = os.getenv("YTDLP_CACHE_DIR", "").strip()
+    if cache_dir:
+        try:
+            FsPath(cache_dir).mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            logger.warning("Could not create YTDLP_CACHE_DIR: %s", type(exc).__name__)
+
+    tasks: List[asyncio.Task] = []
+    if _canary_video_ids():
+        tasks.append(asyncio.create_task(_canary_loop()))
+    tasks.append(asyncio.create_task(_stats_loop()))
+
     try:
         yield
     finally:
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
         if _http_client is not None:
             await _http_client.aclose()
             _http_client = None
@@ -285,6 +453,14 @@ def _ok(data: Any) -> Dict[str, Any]:
     return {"ok": True, "data": data}
 
 
+def _error_response(status: int, code: str, detail: str) -> JSONResponse:
+    """Error body with a stable machine-readable code next to the human text."""
+    return JSONResponse(
+        status_code=status,
+        content={"ok": False, "detail": detail, "code": code},
+    )
+
+
 def _track_out(row: Dict[str, Any]) -> Dict[str, Any]:
     """DB row (track_id, duration) → the one public track shape used everywhere."""
     return {
@@ -332,6 +508,12 @@ def _playlist_not_found() -> HTTPException:
 @app.get("/healthz", include_in_schema=False)
 async def healthz():
     return {"ok": True}
+
+
+@app.get("/health", include_in_schema=False)
+async def health():
+    """Last known resolver state; deliberately never triggers a resolve."""
+    return {"ok": True, "resolver": resolver.get_state()}
 
 
 # ---------------------------------------------------------------------------
@@ -390,12 +572,29 @@ async def api_stream(
     stream_limiter.check(user.id)
     try:
         await run_in_threadpool(resolver.get_stream_url, video_id, fmt)
-    except ValueError:
-        logger.info("Stream: no supported audio format for video_id=%s", video_id)
-        raise HTTPException(status_code=404, detail="No playable audio stream for this track")
+    except resolver.BotCheckError:
+        logger.warning(
+            "Stream: bot check video_id=%s format=%s", video_id, fmt
+        )
+        await _alert_on_transition()
+        return _error_response(
+            503, "bot_check", "Music service is temporarily unavailable"
+        )
+    except resolver.UnavailableError:
+        logger.info("Stream: unavailable video_id=%s format=%s", video_id, fmt)
+        return _error_response(404, "unavailable", "This track is not available")
+    except resolver.TransientResolveError:
+        logger.warning(
+            "Stream: transient resolve error video_id=%s format=%s", video_id, fmt
+        )
+        await _alert_on_transition()
+        return _error_response(502, "upstream_error", "Stream service unavailable")
     except Exception:
-        logger.exception("Stream resolve failed for video_id=%s", video_id)
-        raise HTTPException(status_code=502, detail="Stream service unavailable")
+        logger.exception(
+            "Stream resolve failed for video_id=%s format=%s", video_id, fmt
+        )
+        return _error_response(502, "upstream_error", "Stream service unavailable")
+    await _alert_on_transition()
 
     token = auth.sign_audio_token(AUDIO_KEY, video_id, fmt, user.id, AUDIO_LINK_TTL)
     return _ok({
@@ -438,8 +637,17 @@ async def audio_relay(
     for attempt in (1, 2):
         try:
             cdn_url = await run_in_threadpool(resolver.get_stream_url, video_id, fmt)
-        except ValueError:
+        except resolver.BotCheckError:
+            logger.warning("Audio: bot check video_id=%s format=%s", video_id, fmt)
+            await _alert_on_transition()
+            raise HTTPException(status_code=503, detail="Audio source temporarily unavailable")
+        except resolver.UnavailableError:
+            logger.info("Audio: unavailable video_id=%s format=%s", video_id, fmt)
             raise HTTPException(status_code=404, detail="No playable audio stream for this track")
+        except resolver.TransientResolveError:
+            logger.warning("Audio: transient resolve error video_id=%s format=%s", video_id, fmt)
+            await _alert_on_transition()
+            raise HTTPException(status_code=502, detail="Audio source unavailable")
         except Exception:
             logger.exception("Audio: resolve failed for video_id=%s", video_id)
             raise HTTPException(status_code=502, detail="Audio source unavailable")
@@ -673,8 +881,172 @@ async def api_playlist_remove_track(
 
 
 # ---------------------------------------------------------------------------
-# Telegram bot webhook (/start → "Open Lammot" button)
+# Telegram bot webhook (/start → "Open Lammot" button, /cookies → replace)
 # ---------------------------------------------------------------------------
+def _validate_netscape_cookies(data: bytes) -> Optional[str]:
+    """Return an error message, or None when the file looks like YouTube cookies."""
+    if not data:
+        return "Файл пустой."
+    if len(data) > COOKIES_MAX_BYTES:
+        return "Файл больше 100 KB."
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return "Файл не похож на текстовый Netscape cookies."
+
+    found_youtube = False
+    for raw_line in text.splitlines():
+        line = raw_line.strip("\r")
+        if not line:
+            continue
+        if line.startswith("#HttpOnly_"):
+            line = line[len("#HttpOnly_"):]
+        elif line.startswith("#"):
+            continue
+        fields = line.split("\t")
+        if len(fields) != 7:
+            return "Некорректный формат Netscape cookies."
+        domain = fields[0].strip().lower().lstrip(".")
+        if domain == "youtube.com" or domain.endswith(".youtube.com"):
+            found_youtube = True
+    if not found_youtube:
+        return "В файле нет cookies для youtube.com."
+    return None
+
+
+async def _process_cookies_update(command: Dict[str, Any]) -> None:
+    """
+    Owner-only /cookies flow: validate a document, test it, then atomically
+    replace the active (or reserve) cookies file.  Never replies to strangers.
+    """
+    owner = _owner_tg_id()
+    user_id = command.get("user_id")
+    if owner is None or user_id != owner:
+        return
+
+    client = _get_http()
+    chat_id = command.get("chat_id")
+    message_id = command.get("message_id")
+    target = command.get("target") or "primary"
+    document = command.get("document") or {}
+    target_path = _cookie_path(target)
+
+    try:
+        if not document:
+            await bot.send_message(
+                client, BOT_TOKEN, chat_id,
+                "Отправь файл cookies.txt документом с подписью /cookies "
+                "(для резервного — /cookies reserve).",
+            )
+            return
+        if not target_path:
+            await bot.send_message(
+                client, BOT_TOKEN, chat_id,
+                f"Путь cookies для {target} не настроен на сервере.",
+            )
+            return
+        canaries = _canary_video_ids()
+        if not canaries:
+            await bot.send_message(
+                client, BOT_TOKEN, chat_id,
+                "CANARY_VIDEO_IDS не настроен: проверка cookies невозможна.",
+            )
+            return
+        file_size = int(document.get("file_size") or 0)
+        if file_size > COOKIES_MAX_BYTES:
+            await bot.send_message(
+                client, BOT_TOKEN, chat_id, "Файл больше 100 KB."
+            )
+            return
+
+        data = await bot.download_document(
+            client, BOT_TOKEN, str(document.get("file_id") or "")
+        )
+        format_error = _validate_netscape_cookies(data)
+        if format_error:
+            logger.info(
+                "cookies: user=%s target=%s result=invalid_format", user_id, target
+            )
+            await bot.send_message(client, BOT_TOKEN, chat_id, format_error)
+            return
+
+        parent = FsPath(target_path).parent
+        parent.mkdir(parents=True, exist_ok=True)
+        fd, temp_path = tempfile.mkstemp(
+            prefix=".cookies-", suffix=".tmp", dir=str(parent)
+        )
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(temp_path, 0o600)
+            try:
+                await asyncio.wait_for(
+                    run_in_threadpool(
+                        resolver.verify_cookiefile, temp_path, canaries[0]
+                    ),
+                    timeout=COOKIE_TEST_TIMEOUT_SECONDS,
+                )
+            except Exception as exc:
+                logger.info(
+                    "cookies: user=%s target=%s result=test_failed error=%s",
+                    user_id, target, type(exc).__name__,
+                )
+                await bot.send_message(
+                    client, BOT_TOKEN, chat_id,
+                    "Проверка не прошла: cookies не дают воспроизвести тестовый трек. "
+                    "Старый файл не изменён.",
+                )
+                return
+
+            os.replace(temp_path, target_path)
+            if target == "primary":
+                resolver.set_active_account("primary")
+                resolver.set_status("ok", reason="cookies_replaced")
+            else:
+                resolver.reset_state()
+            logger.info(
+                "cookies: user=%s target=%s result=replaced", user_id, target
+            )
+            await bot.send_message(
+                client, BOT_TOKEN, chat_id,
+                "Cookies заменены, тестовый резолв прошёл.",
+            )
+        finally:
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+    except bot.CookiesTooLargeError:
+        logger.info("cookies: user=%s target=%s result=too_large", user_id, target)
+        await bot.send_message(client, BOT_TOKEN, chat_id, "Файл больше 100 KB.")
+    except bot.TelegramError as exc:
+        logger.warning("cookies: user=%s target=%s result=telegram_error: %s", user_id, target, exc)
+        if chat_id is not None:
+            try:
+                await bot.send_message(
+                    client, BOT_TOKEN, chat_id,
+                    "Не удалось обработать файл. Попробуй ещё раз.",
+                )
+            except bot.TelegramError:
+                pass
+    except Exception as exc:
+        logger.warning(
+            "cookies: user=%s target=%s result=error error=%s",
+            user_id, target, type(exc).__name__,
+        )
+        if chat_id is not None:
+            try:
+                await bot.send_message(
+                    client, BOT_TOKEN, chat_id,
+                    "Не удалось заменить cookies. Старый файл не изменён.",
+                )
+            except bot.TelegramError:
+                pass
+    finally:
+        if chat_id is not None and message_id is not None:
+            await bot.delete_message(client, BOT_TOKEN, chat_id, message_id)
+
+
 @app.post(bot.WEBHOOK_PATH, include_in_schema=False)
 async def telegram_webhook(
     request: Request,
@@ -697,6 +1069,10 @@ async def telegram_webhook(
             await bot.call(_get_http(), BOT_TOKEN, "sendMessage", reply)
         except bot.TelegramError as exc:
             logger.warning("sendMessage failed: %s", exc)
+
+    cookies = bot.parse_cookies_command(update)
+    if cookies is not None:
+        await _process_cookies_update(cookies)
     # Always 200: otherwise Telegram keeps retrying the same update
     return {"ok": True}
 

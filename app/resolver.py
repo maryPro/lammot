@@ -15,10 +15,15 @@ Format priority:
     prefer="aac":            itag 140 M4A/AAC  ~128 kbps, then itag 251
     (Telegram on older iOS cannot play WebM/Opus, so the client asks for aac.)
 
-Caching (app/cache.py, 2 hours):
+Caching (app/cache.py):
     "<video_id>"            → URL for prefer="opus"
     "<video_id>:aac"        → URL for prefer="aac"
     "<key>:headers"         → HTTP headers yt-dlp says to send with that URL
+    "<key>:unavailable"     → negative marker for a dead/unplayable video
+
+The URL cache TTL is derived from the googlevideo ``expire`` query parameter
+instead of a fixed value, so live URLs are kept as long as possible while
+expired ones are never handed out.
 
 yt-dlp needs a JavaScript runtime (Deno) and the yt-dlp-ejs package for
 YouTube since 2025.11 — install "yt-dlp[default]" and Deno (see README).
@@ -32,7 +37,9 @@ import os
 import re
 import threading
 import time
+from collections import Counter
 from typing import Dict, Optional, Tuple
+from urllib.parse import parse_qs, urlparse
 
 import yt_dlp  # type: ignore
 
@@ -41,11 +48,44 @@ from app.cache import cache_delete, cache_get, cache_set
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Errors
+# ---------------------------------------------------------------------------
+
+class ResolverError(Exception):
+    """Base class for resolver failures that are safe to log/classify."""
+
+
+class BotCheckError(ResolverError):
+    """YouTube asks the server to prove it is not a bot."""
+
+
+class TransientResolveError(ResolverError):
+    """Network, timeout, or another error that may succeed on a retry."""
+
+
+class UnavailableError(ValueError):
+    """The video or its audio formats are not available at all."""
+
+
+class VideoUnavailableError(UnavailableError):
+    """Private, removed, age-restricted, or otherwise unavailable video."""
+
+
+class FormatUnavailableError(UnavailableError):
+    """The video has no playable itag 251/140 right now."""
+
+
+# ---------------------------------------------------------------------------
 # Format constants
 # ---------------------------------------------------------------------------
 _PREFERRED_ITAG: int = 251   # WebM/Opus ~160 kbps
-_FALLBACK_ITAG: int  = 140   # M4A/AAC  ~128 kbps
-_STREAM_TTL: float   = 7200  # 2 hours in seconds
+_FALLBACK_ITAG: int = 140    # M4A/AAC  ~128 kbps
+_STREAM_TTL: float = 7200    # fallback when the URL has no usable expire
+_STREAM_TTL_MAX: float = 6 * 3600
+_STREAM_TTL_SAFETY: float = 30 * 60
+_MIN_CACHE_TTL: float = 60
+_NEGATIVE_TTL: float = 3600
+_BOT_CHECK_COOLDOWN: float = 60
 
 # YouTube gates a freshly resolved URL until its ``available_at`` timestamp
 # (the detected pre-roll ad length): requesting it earlier yields HTTP 403.
@@ -71,6 +111,41 @@ _GATE_SWITCH_MIN_SAVING: float = 1.5
 _RESOLVE_LOCKS: Dict[str, threading.Lock] = {}
 _RESOLVE_LOCKS_GUARD = threading.Lock()
 
+# Limit concurrent yt-dlp extractions.  Resolving is expensive and each extra
+# request is another chance for YouTube to answer with a bot check.
+def _env_int(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.getenv(name, str(default))))
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return max(0.0, float(os.getenv(name, str(default))))
+    except ValueError:
+        return default
+
+
+_RESOLVE_CONCURRENCY = _env_int("YTDLP_RESOLVE_CONCURRENCY", 2)
+_RESOLVE_SEMAPHORE = threading.BoundedSemaphore(_RESOLVE_CONCURRENCY)
+_MIN_RESOLVE_INTERVAL = _env_float("YTDLP_MIN_RESOLVE_INTERVAL", 0.0)
+_RESOLVE_PACING_LOCK = threading.Lock()
+_last_resolve_at = 0.0
+
+
+def _pace_resolve() -> None:
+    """Optional minimum spacing between yt-dlp extractions (0 = disabled)."""
+    global _last_resolve_at
+    if _MIN_RESOLVE_INTERVAL <= 0:
+        return
+    with _RESOLVE_PACING_LOCK:
+        wait = _MIN_RESOLVE_INTERVAL - (time.monotonic() - _last_resolve_at)
+        if wait > 0:
+            time.sleep(wait)
+        _last_resolve_at = time.monotonic()
+
+
 FORMATS = ("opus", "aac")
 _ITAG_ORDER = {
     "opus": (_PREFERRED_ITAG, _FALLBACK_ITAG),
@@ -90,10 +165,158 @@ _DEFAULT_HEADERS = {
     ),
 }
 
+# yt-dlp error texts.  Keep these narrow: a false bot-check classification
+# would stop the whole service, while a missed one only causes an extra retry.
+_BOT_CHECK_RE = re.compile(
+    r"sign in to confirm you(?:'|’)?re not a bot|"
+    r"sign in to confirm you are not a bot|"
+    r"confirm you(?:'|’)?re not a bot",
+    re.IGNORECASE,
+)
+_VIDEO_UNAVAILABLE_RE = re.compile(
+    r"video unavailable|private video|removed by the uploader|"
+    r"this video is unavailable|this video is not available|"
+    r"no longer available|age-restricted|confirm your age|"
+    r"not made this video available|not available in your country",
+    re.IGNORECASE,
+)
+_FORMAT_UNAVAILABLE_RE = re.compile(
+    r"requested format is not available|no video formats found|"
+    r"no supported audio format",
+    re.IGNORECASE,
+)
 
-def _ydl_opts(player_clients: Optional[list[str]] = None) -> dict:
+
+# ---------------------------------------------------------------------------
+# Resolver state (in-memory; a single Railway process)
+# ---------------------------------------------------------------------------
+_STATE_LOCK = threading.RLock()
+_STATE: Dict[str, object] = {
+    "status": "unknown",          # unknown | ok | bot_check | degraded
+    "active_account": "primary",  # primary | reserve
+    "last_check": None,
+    "last_error_class": None,
+    "transition_seq": 0,
+    "reason": None,
+}
+
+_STATS_LOCK = threading.Lock()
+_STATS: Counter = Counter()
+
+
+def _inc(name: str, amount: int = 1) -> None:
+    with _STATS_LOCK:
+        _STATS[name] += amount
+
+
+def stats_snapshot(reset: bool = False) -> Dict[str, int]:
+    """Return resolver counters, optionally resetting them for the next hour."""
+    with _STATS_LOCK:
+        snapshot = dict(_STATS)
+        if reset:
+            _STATS.clear()
+    return snapshot
+
+
+def get_state() -> Dict[str, object]:
+    """A copy of the current resolver state, safe to expose on /health."""
+    with _STATE_LOCK:
+        return dict(_STATE)
+
+
+def set_status(status: str, reason: Optional[str] = None) -> None:
+    with _STATE_LOCK:
+        changed = status != _STATE["status"]
+        _STATE["status"] = status
+        _STATE["last_check"] = time.time()
+        if reason is not None:
+            _STATE["reason"] = reason
+        if changed:
+            _STATE["transition_seq"] = int(_STATE["transition_seq"]) + 1
+
+
+def set_active_account(account: str) -> None:
+    if account not in ("primary", "reserve"):
+        raise ValueError(f"unknown cookie account: {account!r}")
+    with _STATE_LOCK:
+        changed = account != _STATE["active_account"]
+        _STATE["active_account"] = account
+        if changed:
+            _STATE["transition_seq"] = int(_STATE["transition_seq"]) + 1
+            _STATE["reason"] = "account_switch"
+
+
+def reset_state() -> None:
+    with _STATE_LOCK:
+        _STATE.update({
+            "status": "unknown",
+            "last_check": None,
+            "last_error_class": None,
+            "reason": "reset",
+        })
+        _STATE["transition_seq"] = int(_STATE["transition_seq"]) + 1
+
+
+def _active_account() -> str:
+    with _STATE_LOCK:
+        return str(_STATE["active_account"])
+
+
+def _bot_check_active() -> bool:
+    with _STATE_LOCK:
+        if _STATE["status"] != "bot_check":
+            return False
+        last = _STATE.get("last_check")
+        return bool(last) and time.time() - float(last) < _BOT_CHECK_COOLDOWN
+
+
+def _record_success() -> None:
+    _inc("resolve_ok")
+    set_status("ok", reason="ok")
+    with _STATE_LOCK:
+        _STATE["last_error_class"] = None
+
+
+def _record_failure(exc: Exception) -> None:
+    if isinstance(exc, BotCheckError):
+        _inc("bot_check")
+        set_status("bot_check", reason="bot_check")
+    elif isinstance(exc, UnavailableError):
+        _inc("unavailable")
+    elif isinstance(exc, TransientResolveError):
+        _inc("transient")
+        with _STATE_LOCK:
+            # An unavailable video is not a service-wide degradation.
+            if _STATE["status"] == "ok":
+                set_status("degraded", reason="degraded")
+    with _STATE_LOCK:
+        _STATE["last_error_class"] = type(exc).__name__
+
+
+# ---------------------------------------------------------------------------
+# Options
+# ---------------------------------------------------------------------------
+
+def _configured_clients() -> Tuple[str, ...]:
+    """Player clients, overridable in production without a code change."""
+    raw = os.getenv("YTDLP_PLAYER_CLIENTS", "").strip()
+    if raw:
+        clients = tuple(c.strip() for c in raw.split(",") if c.strip())
+        if clients:
+            return clients
+    return _DEFAULT_CLIENTS
+
+
+def _ydl_opts(
+    player_clients: Optional[list[str]] = None,
+    cookiefile: Optional[str] = None,
+) -> dict:
     """yt-dlp options — extract info only, no download, no console noise."""
-    clients = list(player_clients) if player_clients else list(_DEFAULT_CLIENTS)
+    clients = (
+        list(player_clients)
+        if player_clients is not None
+        else list(_configured_clients())
+    )
     opts: dict = {
         "quiet": True,            # suppress progress output
         "no_warnings": True,      # suppress warning lines
@@ -105,9 +328,25 @@ def _ydl_opts(player_clients: Optional[list[str]] = None) -> dict:
             "youtube": {"player_client": clients},
         },
     }
+
+    # Optional persistent player/n-sig cache on the Railway volume.  This is
+    # deliberately opt-in: local runs and tests must not write to /data.
+    cache_dir = os.getenv("YTDLP_CACHE_DIR", "").strip()
+    if cache_dir:
+        opts["cachedir"] = cache_dir
+
+    # Optional PO token provider (bgutil HTTP service).  Absent in normal
+    # deployments; enabling it also requires installing the bgutil plugin
+    # (a dependency change that is intentionally not part of this PR).
+    bgutil = os.getenv("BGUTIL_BASE_URL", "").strip()
+    if bgutil:
+        opts["extractor_args"]["youtubepot-bgutilhttp"] = {
+            "base_url": [bgutil],
+        }
+
     # Optional, for hosts where YouTube asks to "confirm you're not a bot".
     # The file holds account cookies: treat it as a secret (see README).
-    cookies = os.getenv("YTDLP_COOKIES_FILE")
+    cookies = cookiefile if cookiefile is not None else os.getenv("YTDLP_COOKIES_FILE")
     if cookies:
         opts["cookiefile"] = cookies
     return opts
@@ -115,6 +354,10 @@ def _ydl_opts(player_clients: Optional[list[str]] = None) -> dict:
 
 def _cache_key(video_id: str, prefer: str) -> str:
     return video_id if prefer == "opus" else f"{video_id}:{prefer}"
+
+
+def _negative_key(key: str) -> str:
+    return f"{key}:unavailable"
 
 
 def _resolve_lock(key: str) -> threading.Lock:
@@ -125,6 +368,34 @@ def _resolve_lock(key: str) -> threading.Lock:
             lock = threading.Lock()
             _RESOLVE_LOCKS[key] = lock
         return lock
+
+
+def _ttl_for_url(url: str) -> float:
+    """
+    Cache TTL derived from the googlevideo ``expire`` query parameter.
+
+    Returns 0 when the URL is too close to expiry to be worth caching.
+    """
+    try:
+        params = parse_qs(urlparse(url).query)
+        expire = int(params.get("expire", [""])[0])
+    except (TypeError, ValueError):
+        return _STREAM_TTL
+    if not expire:
+        return _STREAM_TTL
+    ttl = expire - time.time() - _STREAM_TTL_SAFETY
+    if ttl < _MIN_CACHE_TTL:
+        return 0.0
+    return min(ttl, _STREAM_TTL_MAX)
+
+
+def _raise_negative(kind: str, video_id: str) -> None:
+    if kind == "video":
+        raise VideoUnavailableError(f"Video unavailable: video_id={video_id!r}")
+    raise FormatUnavailableError(
+        f"No supported audio format (itag 251 or 140) found "
+        f"for video_id={video_id!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -203,20 +474,46 @@ def _select_format(formats: list[dict], prefer: str) -> Optional[dict]:
     return fmt
 
 
-def _extract_formats(video_id: str, player_clients: Tuple[str, ...]) -> list[dict]:
+def _classify_ytdlp_error(exc: Exception, video_id: str) -> ResolverError:
+    """Map a yt-dlp error to a stable resolver exception without its URL."""
+    text = str(exc)
+    if _BOT_CHECK_RE.search(text):
+        return BotCheckError(f"YouTube bot check for video_id={video_id!r}")
+    if _VIDEO_UNAVAILABLE_RE.search(text):
+        return VideoUnavailableError(f"Video unavailable: video_id={video_id!r}")
+    if _FORMAT_UNAVAILABLE_RE.search(text):
+        return FormatUnavailableError(
+            f"No supported audio format for video_id={video_id!r}"
+        )
+    return TransientResolveError(
+        f"yt-dlp failed for video_id={video_id!r} ({type(exc).__name__})"
+    )
+
+
+def _extract_formats(
+    video_id: str,
+    player_clients: Tuple[str, ...],
+    cookiefile: Optional[str] = None,
+) -> list[dict]:
     """Run yt-dlp for one client set and return its format list."""
     url = f"https://www.youtube.com/watch?v={video_id}"
     try:
-        with yt_dlp.YoutubeDL(_ydl_opts(list(player_clients))) as ydl:
+        with yt_dlp.YoutubeDL(_ydl_opts(list(player_clients), cookiefile)) as ydl:
             info: dict = ydl.extract_info(url, download=False)
     except yt_dlp.utils.YoutubeDLError as exc:
-        raise RuntimeError(
-            f"yt-dlp failed to extract info for video_id={video_id!r}: {exc}"
+        raise _classify_ytdlp_error(exc, video_id) from exc
+    except Exception as exc:  # network/socket errors and plugin failures
+        raise TransientResolveError(
+            f"yt-dlp failed for video_id={video_id!r} ({type(exc).__name__})"
         ) from exc
     return (info or {}).get("formats") or []
 
 
-def _resolve_via_ytdlp(video_id: str, prefer: str = "opus") -> Tuple[str, Dict[str, str]]:
+def _resolve_via_ytdlp(
+    video_id: str,
+    prefer: str = "opus",
+    cookiefile: Optional[str] = None,
+) -> Tuple[str, Dict[str, str]]:
     """
     Call yt-dlp to extract audio format information for *video_id*.
 
@@ -224,15 +521,17 @@ def _resolve_via_ytdlp(video_id: str, prefer: str = "opus") -> Tuple[str, Dict[s
 
     Raises
     ------
-    ValueError
-        If neither itag 251 nor itag 140 is available for this video.
-    RuntimeError
-        If yt-dlp itself raises an exception during extraction.
+    BotCheckError, VideoUnavailableError, FormatUnavailableError,
+    TransientResolveError
     """
-    first_error: Optional[RuntimeError] = None
+    first_error: Optional[ResolverError] = None
     try:
-        formats = _extract_formats(video_id, _DEFAULT_CLIENTS)
-    except RuntimeError as exc:
+        formats = _extract_formats(video_id, _configured_clients(), cookiefile)
+    except (BotCheckError, VideoUnavailableError):
+        # Both are IP/account or video-wide: another embedded-only extraction
+        # cannot fix them and only adds load on YouTube.
+        raise
+    except (FormatUnavailableError, TransientResolveError) as exc:
         first_error = exc
         formats = []
 
@@ -247,17 +546,22 @@ def _resolve_via_ytdlp(video_id: str, prefer: str = "opus") -> Tuple[str, Dict[s
             video_id,
             _gate_wait(fmt) if fmt else -1.0,
         )
+        second_error: Optional[ResolverError] = None
         try:
-            extra = _extract_formats(video_id, _EMBEDDED_CLIENTS)
-        except Exception as exc:  # retry is best-effort; keep the first result
-            logger.info("Resolver: embedded retry failed for %s: %s", video_id, exc)
+            extra = _extract_formats(video_id, _EMBEDDED_CLIENTS, cookiefile)
+        except (BotCheckError, VideoUnavailableError):
+            raise
+        except (FormatUnavailableError, TransientResolveError) as exc:
+            second_error = exc
         else:
             fmt = _select_format(formats + extra, prefer)
+        if fmt is None and second_error is not None:
+            raise second_error
 
     if fmt is None:
         if first_error is not None:
             raise first_error
-        raise ValueError(
+        raise FormatUnavailableError(
             f"No supported audio format (itag 251 or 140) found "
             f"for video_id={video_id!r}"
         )
@@ -285,7 +589,7 @@ def _wait_until_available(fmt: dict) -> None:
     if wait <= 0:
         return
     if wait > _MAX_AVAILABILITY_WAIT:
-        raise ValueError(
+        raise FormatUnavailableError(
             f"Format is not available yet (available_at in {int(wait)}s)"
         )
 
@@ -304,59 +608,165 @@ def _validate(video_id: str, prefer: str) -> str:
     return video_id
 
 
+def _resolve_with_accounts(
+    video_id: str,
+    prefer: str,
+    cookiefile: Optional[str] = None,
+) -> Tuple[str, Dict[str, str], str]:
+    """
+    Try the active cookie file, then the reserve one on a bot check.
+
+    Only bot checks trigger a switch: a transient network error is not a
+    reason to burn requests on the second account.
+    """
+    if cookiefile is not None:
+        url, headers = _resolve_via_ytdlp(video_id, prefer, cookiefile)
+        return url, headers, _active_account()
+
+    primary = os.getenv("YTDLP_COOKIES_FILE", "").strip()
+    reserve = os.getenv("YTDLP_RESERVE_COOKIES_FILE", "").strip()
+    active = _active_account()
+
+    if active == "reserve":
+        candidates = [("reserve", reserve), ("primary", primary)]
+    else:
+        candidates = [("primary", primary), ("reserve", reserve)]
+
+    seen: set[str] = set()
+    last_bot_check: Optional[BotCheckError] = None
+    had_cookie_file = False
+
+    for account, path in candidates:
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        had_cookie_file = True
+        if not os.path.exists(path):
+            logger.warning("Resolver: cookies file for %s is missing", account)
+            continue
+        try:
+            url, headers = _resolve_via_ytdlp(video_id, prefer, path)
+        except BotCheckError as exc:
+            last_bot_check = exc
+            continue
+        if account != active:
+            set_active_account(account)
+            _inc("account_switches")
+            logger.warning("Resolver: switched to %s cookies", account)
+        return url, headers, account
+
+    if last_bot_check is not None:
+        raise last_bot_check
+    if had_cookie_file:
+        # Every configured file was missing/unreadable; surface the real
+        # yt-dlp result without cookies rather than inventing an error.
+        logger.warning("Resolver: no usable cookies file, resolving anonymously")
+
+    url, headers = _resolve_via_ytdlp(video_id, prefer, None)
+    return url, headers, active
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
-def get_stream_url(video_id: str, prefer: str = "opus") -> str:
+def get_stream_url(
+    video_id: str,
+    prefer: str = "opus",
+    force: bool = False,
+    cookiefile: Optional[str] = None,
+) -> str:
     """
     Return a direct HTTPS audio CDN URL for a YouTube video.
 
     The URL is served by Google's CDN (``*.googlevideo.com``) and only works
     from the IP address of the machine that resolved it.
 
-    Results are cached in-memory for 2 hours so that repeated calls for the
-    same track are instant (~0 ms) without hitting YouTube.
+    Results are cached until shortly before the URL's ``expire`` timestamp.
+
+    Parameters
+    ----------
+    force:
+        Bypass the cache, negative cache and the global bot-check gate.
+        Used by the canary and cookie validation.
+    cookiefile:
+        Use this explicit cookies file instead of the configured accounts.
+        Used by /cookies validation.
 
     Raises
     ------
     ValueError
-        If *video_id* is empty / not a valid YouTube id, *prefer* is unknown,
-        or neither of the required audio formats is available.
-    RuntimeError
-        If yt-dlp encounters a network or extraction error.
-
-    Examples
-    --------
-    >>> url = get_stream_url("dQw4w9WgXcQ")
-    >>> url.startswith("https://")
-    True
-    >>> "googlevideo" in url
-    True
+        If *video_id* is empty / not a valid YouTube id or *prefer* is unknown.
+    VideoUnavailableError, FormatUnavailableError
+        If the video or its audio is not playable.
+    BotCheckError
+        If YouTube demands a bot check (or it was recently detected).
+    TransientResolveError
+        If yt-dlp encounters a network or other temporary error.
     """
     video_id = _validate(video_id, prefer)
     key = _cache_key(video_id, prefer)
 
-    # --- Cache hit ---
-    cached = cache_get(key)
-    if cached is not None:
-        logger.debug("Resolver: cache hit for %s", key)
-        return cached
+    if not force:
+        negative = cache_get(_negative_key(key))
+        if negative is not None:
+            _inc("cache_hits")
+            _raise_negative(negative, video_id)
+
+        cached = cache_get(key)
+        if cached is not None:
+            _inc("cache_hits")
+            logger.debug("Resolver: cache hit for %s", key)
+            return cached
+
+        # A cached URL is still playable after the cookies died, so only
+        # block calls that would need a fresh yt-dlp extraction.
+        if _bot_check_active():
+            raise BotCheckError("YouTube bot check is active; resolver paused")
 
     # --- Cache miss: resolve once per key, even under concurrent requests ---
     lock = _resolve_lock(key)
     with lock:
-        cached = cache_get(key)
-        if cached is not None:
-            logger.debug("Resolver: cache filled while waiting for %s", key)
-            return cached
+        if not force:
+            negative = cache_get(_negative_key(key))
+            if negative is not None:
+                _inc("cache_hits")
+                _raise_negative(negative, video_id)
+            cached = cache_get(key)
+            if cached is not None:
+                _inc("cache_hits")
+                logger.debug("Resolver: cache filled while waiting for %s", key)
+                return cached
+            if _bot_check_active():
+                raise BotCheckError("YouTube bot check is active; resolver paused")
 
         logger.info("Resolver: cache miss — resolving via yt-dlp for %s", key)
-        stream_url, headers = _resolve_via_ytdlp(video_id, prefer)
+        with _RESOLVE_SEMAPHORE:
+            _pace_resolve()
+            try:
+                stream_url, headers, _account = _resolve_with_accounts(
+                    video_id, prefer, cookiefile
+                )
+            except UnavailableError as exc:
+                if not force:
+                    kind = "video" if isinstance(exc, VideoUnavailableError) else "format"
+                    cache_set(_negative_key(key), kind, ttl=_NEGATIVE_TTL)
+                _record_failure(exc)
+                raise
+            except (BotCheckError, TransientResolveError) as exc:
+                _record_failure(exc)
+                raise
 
-        cache_set(key, stream_url, ttl=_STREAM_TTL)
-        cache_set(f"{key}:headers", json.dumps(headers), ttl=_STREAM_TTL)
-        logger.info("Resolver: cached stream URL for %s (TTL=%ds)", key, int(_STREAM_TTL))
+        ttl = _ttl_for_url(stream_url)
+        if ttl > 0:
+            cache_set(key, stream_url, ttl=ttl)
+            cache_set(f"{key}:headers", json.dumps(headers), ttl=ttl)
+            logger.info(
+                "Resolver: cached stream URL for %s (TTL=%ds)", key, int(ttl)
+            )
+        else:
+            logger.info("Resolver: not caching %s (URL expires too soon)", key)
+        _record_success()
 
     return stream_url
 
@@ -377,3 +787,24 @@ def invalidate(video_id: str, prefer: str = "opus") -> None:
     key = _cache_key(video_id, prefer)
     cache_delete(key)
     cache_delete(f"{key}:headers")
+    cache_delete(_negative_key(key))
+
+
+def verify_cookiefile(
+    path: str,
+    video_id: str,
+    prefer: str = "opus",
+) -> bool:
+    """
+    Prove that *path* is a working cookies file without touching global state.
+
+    Only extraction and format selection are performed: waiting for a pre-roll
+    gate is pointless here and would make /cookies slow.
+    """
+    video_id = _validate(video_id, prefer)
+    formats = _extract_formats(video_id, _configured_clients(), cookiefile=path)
+    if _select_format(formats, prefer) is None:
+        raise FormatUnavailableError(
+            f"No supported audio format for video_id={video_id!r}"
+        )
+    return True

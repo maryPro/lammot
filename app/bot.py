@@ -28,13 +28,19 @@ logger = logging.getLogger("lammot.bot")
 TELEGRAM_API = "https://api.telegram.org"
 WEBHOOK_PATH = "/telegram/webhook"
 OPEN_BUTTON_TEXT = "Open Lammot 🎵"
+COOKIES_MAX_BYTES = 100 * 1024
 
 # Payload of t.me/<bot>?start=playlist_<token> (fallback share link)
 _START_PLAYLIST_RE = re.compile(r"^/start(?:@\w+)?\s+playlist_([A-Za-z0-9_-]{16,64})$")
+_COOKIES_RE = re.compile(r"^/cookies(?:@\w+)?(?:\s+(reserve))?\s*$", re.IGNORECASE)
 
 
 class TelegramError(Exception):
     """A Bot API call failed. The message never contains the bot token."""
+
+
+class CookiesTooLargeError(TelegramError):
+    """The uploaded cookies file exceeds the accepted size."""
 
 
 def webhook_secret(bot_token: str) -> str:
@@ -105,3 +111,91 @@ def build_start_reply(update: Dict[str, Any], public_url: str) -> Optional[Dict[
             "inline_keyboard": [[{"text": button_text, "web_app": {"url": url}}]],
         },
     }
+
+
+def parse_cookies_command(update: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Parse /cookies or /cookies reserve, including the caption of a document.
+
+    Returns the fields needed to validate and replace a cookies file.  The
+    caller is responsible for the owner check.
+    """
+    message = update.get("message") or {}
+    text = (message.get("text") or message.get("caption") or "").strip()
+    match = _COOKIES_RE.match(text)
+    if not match:
+        return None
+    sender = message.get("from") or {}
+    chat = message.get("chat") or {}
+    return {
+        "chat_id": chat.get("id"),
+        "user_id": sender.get("id"),
+        "message_id": message.get("message_id"),
+        "document": message.get("document") or {},
+        "target": "reserve" if match.group(1) else "primary",
+    }
+
+
+async def send_message(
+    client: httpx.AsyncClient,
+    bot_token: str,
+    chat_id: int,
+    text: str,
+) -> None:
+    await call(client, bot_token, "sendMessage", {
+        "chat_id": chat_id,
+        "text": text,
+        "disable_web_page_preview": True,
+    })
+
+
+async def delete_message(
+    client: httpx.AsyncClient,
+    bot_token: str,
+    chat_id: int,
+    message_id: int,
+) -> None:
+    """Best-effort removal; old messages or group permissions may fail."""
+    try:
+        await call(client, bot_token, "deleteMessage", {
+            "chat_id": chat_id,
+            "message_id": message_id,
+        })
+    except TelegramError:
+        pass
+
+
+async def download_document(
+    client: httpx.AsyncClient,
+    bot_token: str,
+    file_id: str,
+    max_bytes: int = COOKIES_MAX_BYTES,
+) -> bytes:
+    """
+    Download a Telegram document with a hard size limit.
+
+    The file URL contains the bot token, so exceptions never include the URL.
+    """
+    result = await call(client, bot_token, "getFile", {"file_id": file_id})
+    file_path = (result or {}).get("file_path")
+    if not file_path:
+        raise TelegramError("getFile: no file_path")
+
+    data = bytearray()
+    try:
+        async with client.stream(
+            "GET", f"{TELEGRAM_API}/file/bot{bot_token}/{file_path}"
+        ) as resp:
+            if resp.status_code != 200:
+                raise TelegramError(f"downloadFile: HTTP {resp.status_code}")
+            async for chunk in resp.aiter_bytes():
+                data.extend(chunk)
+                if len(data) > max_bytes:
+                    raise CookiesTooLargeError("cookies file is too large")
+    except CookiesTooLargeError:
+        raise
+    except TelegramError:
+        raise
+    except httpx.HTTPError as exc:
+        raise TelegramError(f"downloadFile: {type(exc).__name__}") from None
+    return bytes(data)

@@ -17,7 +17,7 @@ import httpx
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from app import main
+from app import main, resolver
 from app.main import BOT_TOKEN, app
 
 VID = "dQw4w9WgXcQ"
@@ -155,9 +155,30 @@ async def test_stream_rejects_invalid_video_id(client, headers):
 
 
 async def test_stream_no_format_returns_404(client, headers):
-    with patch("app.main.resolver.get_stream_url", side_effect=ValueError("no format")):
+    with patch("app.main.resolver.get_stream_url", side_effect=resolver.FormatUnavailableError("no format")):
         r = await client.get(f"/api/stream/{VID}", headers=headers)
     assert r.status_code == 404
+    assert r.json()["code"] == "unavailable"
+
+
+async def test_stream_bot_check_returns_503_with_code(client, headers):
+    with patch("app.main.resolver.get_stream_url", side_effect=resolver.BotCheckError("bot")):
+        r = await client.get(f"/api/stream/{VID}", headers=headers)
+    assert r.status_code == 503
+    assert r.json()["code"] == "bot_check"
+
+
+async def test_stream_transient_error_returns_502_with_code(client, headers):
+    with patch("app.main.resolver.get_stream_url", side_effect=resolver.TransientResolveError("net")):
+        r = await client.get(f"/api/stream/{VID}", headers=headers)
+    assert r.status_code == 502
+    assert r.json()["code"] == "upstream_error"
+
+
+async def test_health_reports_resolver_state_without_auth(client):
+    r = await client.get("/health")
+    assert r.status_code == 200
+    assert "resolver" in r.json()
 
 
 # -------------------------------------------------------------- audio relay
@@ -369,3 +390,144 @@ async def test_webhook_start_sends_open_button(client, monkeypatch):
     assert method == "sendMessage"
     button = payload["reply_markup"]["inline_keyboard"][0][0]
     assert button["web_app"]["url"] == "https://lammot.example"
+
+
+# --------------------------------------------------------------- /cookies
+_COOKIE_BYTES = b".youtube.com\tTRUE\t/\tTRUE\t9999999999\tSID\tvalue\n"
+
+
+def _cookies_update(user_id=777, caption="/cookies"):
+    return {
+        "update_id": 2,
+        "message": {
+            "message_id": 9,
+            "chat": {"id": 42},
+            "from": {"id": user_id},
+            "caption": caption,
+            "document": {"file_id": "file-1", "file_size": len(_COOKIE_BYTES)},
+        },
+    }
+
+
+async def test_webhook_cookies_silently_ignores_strangers(client, monkeypatch, tmp_path):
+    target = tmp_path / "cookies.txt"
+    target.write_bytes(b"old")
+    monkeypatch.setattr(main, "PUBLIC_URL", "https://lammot.example")
+    monkeypatch.setenv("OWNER_TG_ID", "777")
+    monkeypatch.setenv("YTDLP_COOKIES_FILE", str(target))
+    monkeypatch.setenv("CANARY_VIDEO_IDS", VID)
+
+    with patch("app.main.bot.call", new=AsyncMock()) as call:
+        r = await client.post(
+            "/telegram/webhook",
+            json=_cookies_update(user_id=999),
+            headers={"X-Telegram-Bot-Api-Secret-Token": main.WEBHOOK_SECRET},
+        )
+
+    assert r.status_code == 200
+    assert call.await_count == 0
+    assert target.read_bytes() == b"old"
+
+
+async def test_webhook_cookies_replaces_after_successful_test(client, monkeypatch, tmp_path):
+    target = tmp_path / "cookies.txt"
+    target.write_bytes(b"old")
+    monkeypatch.setattr(main, "PUBLIC_URL", "https://lammot.example")
+    monkeypatch.setenv("OWNER_TG_ID", "777")
+    monkeypatch.setenv("YTDLP_COOKIES_FILE", str(target))
+    monkeypatch.setenv("CANARY_VIDEO_IDS", VID)
+
+    with patch(
+        "app.main.bot.download_document", new=AsyncMock(return_value=_COOKIE_BYTES)
+    ), patch("app.main.bot.call", new=AsyncMock()) as call, patch(
+        "app.main.resolver.verify_cookiefile", return_value=True
+    ):
+        r = await client.post(
+            "/telegram/webhook",
+            json=_cookies_update(),
+            headers={"X-Telegram-Bot-Api-Secret-Token": main.WEBHOOK_SECRET},
+        )
+
+    assert r.status_code == 200
+    assert target.read_bytes() == _COOKIE_BYTES
+    assert target.stat().st_mode & 0o777 == 0o600
+    methods = [c.args[2] for c in call.call_args_list]
+    assert "sendMessage" in methods
+    assert "deleteMessage" in methods
+
+
+async def test_webhook_cookies_keeps_old_file_when_test_fails(client, monkeypatch, tmp_path):
+    target = tmp_path / "cookies.txt"
+    target.write_bytes(b"old")
+    monkeypatch.setattr(main, "PUBLIC_URL", "https://lammot.example")
+    monkeypatch.setenv("OWNER_TG_ID", "777")
+    monkeypatch.setenv("YTDLP_COOKIES_FILE", str(target))
+    monkeypatch.setenv("CANARY_VIDEO_IDS", VID)
+
+    with patch(
+        "app.main.bot.download_document", new=AsyncMock(return_value=_COOKIE_BYTES)
+    ), patch("app.main.bot.call", new=AsyncMock()) as call, patch(
+        "app.main.resolver.verify_cookiefile", side_effect=Exception("bad cookies")
+    ):
+        r = await client.post(
+            "/telegram/webhook",
+            json=_cookies_update(),
+            headers={"X-Telegram-Bot-Api-Secret-Token": main.WEBHOOK_SECRET},
+        )
+
+    assert r.status_code == 200
+    assert target.read_bytes() == b"old"
+    assert any("Проверка не прошла" in c.args[3].get("text", "") for c in call.call_args_list)
+
+
+# ------------------------------------------------------------------ canary
+def test_canary_status_aggregation():
+    assert main._resolver_status_from(["ok", "bot_check"]) == "ok"
+    assert main._resolver_status_from(["bot_check", "bot_check"]) == "bot_check"
+    assert main._resolver_status_from(["transient", "other"]) == "degraded"
+
+
+async def test_canary_sets_bot_check_state(client, monkeypatch):
+    monkeypatch.setenv("CANARY_VIDEO_IDS", VID)
+    with patch("app.main.resolver.get_stream_url", side_effect=resolver.BotCheckError("bot")):
+        await main._run_canary_once()
+    assert resolver.get_state()["status"] == "bot_check"
+
+
+async def test_canary_sets_ok_state(client, monkeypatch):
+    monkeypatch.setenv("CANARY_VIDEO_IDS", VID)
+    with patch("app.main.resolver.get_stream_url", return_value=CDN_URL):
+        await main._run_canary_once()
+    assert resolver.get_state()["status"] == "ok"
+
+
+async def test_audio_relay_returns_503_on_bot_check(client, headers, cdn):
+    link = await _audio_link(client, headers)
+    with patch("app.main.resolver.get_stream_url", side_effect=resolver.BotCheckError("bot")):
+        r = await client.get(link)
+    assert r.status_code == 503
+
+
+async def test_webhook_cookies_rejects_invalid_format(client, monkeypatch, tmp_path):
+    target = tmp_path / "cookies.txt"
+    target.write_bytes(b"old")
+    monkeypatch.setattr(main, "PUBLIC_URL", "https://lammot.example")
+    monkeypatch.setenv("OWNER_TG_ID", "777")
+    monkeypatch.setenv("YTDLP_COOKIES_FILE", str(target))
+    monkeypatch.setenv("CANARY_VIDEO_IDS", VID)
+
+    with patch(
+        "app.main.bot.download_document", new=AsyncMock(return_value=b"not a cookie file")
+    ), patch("app.main.bot.call", new=AsyncMock()) as call, patch(
+        "app.main.resolver.verify_cookiefile", return_value=True
+    ) as verify:
+        r = await client.post(
+            "/telegram/webhook",
+            json=_cookies_update(),
+            headers={"X-Telegram-Bot-Api-Secret-Token": main.WEBHOOK_SECRET},
+        )
+
+    assert r.status_code == 200
+    assert target.read_bytes() == b"old"
+    verify.assert_not_called()
+    assert any("Некорректный формат" in c.args[3].get("text", "") for c in call.call_args_list)

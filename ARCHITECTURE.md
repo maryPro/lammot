@@ -75,7 +75,7 @@ ships Deno, and `yt-dlp[default]` installs the `yt-dlp-ejs` scripts.
 ### Caching
 | What | Where | TTL |
 |---|---|---|
-| `video_id(+format) → CDN URL` and its HTTP headers | In-memory dict (`app/cache.py`) | 2 hours |
+| `video_id(+format) → CDN URL` and its HTTP headers | In-memory dict (`app/cache.py`) | From URL `expire` − 30 min (max 6 h; 2 h fallback) |
 | `track_key → video_id` | SQLite `track_resolution` (table ready, not used yet) | Forever |
 
 ---
@@ -129,6 +129,7 @@ Responses use `{"ok": true, "data": ...}`. Tracks always have one shape:
 | `GET` | `/api/playlists/shared/{share_token}` | public | Read-only shared playlist (no owner data) |
 | `POST` | `/telegram/webhook` | secret header | Bot updates from Telegram |
 | `GET` | `/healthz` | public | Healthcheck for Railway |
+| `GET` | `/health` | public | Last canary/resolver state (never resolves) |
 
 ### Authentication
 - Header format: `Authorization: tma <initData>`
@@ -240,9 +241,10 @@ CREATE TABLE track_resolution (
 ## 7. Caching Strategy (app/cache.py)
 
 No Redis. In-memory TTL dict, max 5000 entries, lazy eviction.
-**TTL = 2 hours:** YouTube CDN URLs expire in ~6 hours; 2 h leaves margin.
-One process only (single uvicorn worker), so the cache and the rate limiter
-are consistent.
+**TTL is derived from the CDN URL's `expire` parameter** (minus a 30 min safety
+margin, capped at 6 h); 2 h is the fallback when `expire` is unavailable.
+Dead videos are negative-cached for 1 h. One process only (single uvicorn
+worker), so the cache, resolver state and rate limiter are consistent.
 
 ---
 

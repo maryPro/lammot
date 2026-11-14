@@ -33,3 +33,40 @@ def test_webhook_secret_fits_telegram_rules():
     secret = bot.webhook_secret("123:abc")
     assert re.fullmatch(r"[A-Za-z0-9_-]{1,256}", secret)
     assert secret != bot.webhook_secret("123:other")
+
+
+def test_parse_cookies_command_from_text_and_caption():
+    text_update = {
+        "message": {
+            "message_id": 5,
+            "chat": {"id": 42},
+            "from": {"id": 777},
+            "text": "/cookies",
+            "document": {"file_id": "f1"},
+        }
+    }
+    parsed = bot.parse_cookies_command(text_update)
+    assert parsed == {
+        "chat_id": 42,
+        "user_id": 777,
+        "message_id": 5,
+        "document": {"file_id": "f1"},
+        "target": "primary",
+    }
+
+    caption_update = {
+        "message": {
+            "message_id": 6,
+            "chat": {"id": 42},
+            "from": {"id": 777},
+            "caption": "/cookies@lammot_bot reserve",
+            "document": {"file_id": "f2"},
+        }
+    }
+    parsed = bot.parse_cookies_command(caption_update)
+    assert parsed["target"] == "reserve"
+
+
+def test_other_commands_are_not_cookies():
+    assert bot.parse_cookies_command(_update("/start")) is None
+    assert bot.parse_cookies_command(_update("/cookies-extra")) is None

@@ -98,6 +98,13 @@ pytest -m integration -v
    | `PUBLIC_URL` | `https://<твой-домен>.up.railway.app` (без `/` в конце) |
    | `DATABASE_PATH` | `/data/lammot.db` |
 
+   Опционально, если YouTube просит подтвердить, что сервер не бот:
+   `YTDLP_COOKIES_FILE=/data/cookies.txt`,
+   `YTDLP_RESERVE_COOKIES_FILE=/data/cookies-reserve.txt`,
+   `YTDLP_CACHE_DIR=/data/cache`, `OWNER_TG_ID=<твой Telegram id>`,
+   `CANARY_VIDEO_IDS=<2–3 стабильных video_id через запятую>`.
+   Полный список — в `.env.example`.
+
 4. **Volume** (обязательно): добавь к сервису Volume с mount path **`/data`**. Без него база стирается при каждом деплое.
 5. Сделай **Redeploy**. В **Deploy Logs** должна быть строка `Telegram webhook and menu button set for ...`, а `https://<домен>/healthz` должен отвечать `{"ok":true}`.
 
@@ -169,7 +176,7 @@ git push -u origin sprints-5-8
 
 **Песни не играют, в логах `yt-dlp failed`.** Обнови yt-dlp (`pip install -U "yt-dlp[default]"`, на Railway — Redeploy) и проверь, что Deno установлен (`deno --version`). YouTube часто меняется, старые версии yt-dlp перестают работать.
 
-**В логах «Sign in to confirm you're not a bot».** YouTube блокирует IP сервера. Можно указать `YTDLP_COOKIES_FILE` с cookies **отдельного, одноразового** Google-аккаунта: это данные входа, их нельзя коммитить, а аккаунт могут заблокировать. Подробности — в FAQ yt-dlp.
+**В логах «Sign in to confirm you're not a bot».** YouTube блокирует IP сервера. Укажи `YTDLP_COOKIES_FILE` с cookies **отдельного, одноразового** Google-аккаунта: это данные входа, их нельзя коммитить, а аккаунт могут заблокировать. Второй файл можно положить в `YTDLP_RESERVE_COOKIES_FILE`: при bot-check резолвер один раз попробует его и переключится. Замена cookies без redeploy: отправь боту файл документом с подписью `/cookies` (только `OWNER_TG_ID`); сервер сначала проверит файл на тестовом треке, затем атомарно заменит старый. `/cookies reserve` заменяет резервный файл. Состояние резолвера видно в `GET /health`, алерты о смене состояния приходят владельцу в Telegram. Подробности — в FAQ yt-dlp.
 
 **База пропала после деплоя.** Не подключён Volume на `/data` или `DATABASE_PATH` указывает не туда.
 
@@ -185,7 +192,7 @@ git push -u origin sprints-5-8
 - **Удаление:** Settings → **Clear search/play history** или **Delete all my data** (удаляет всё, ссылки на плейлисты перестают работать).
 - **Обои** хранятся только на устройстве (localStorage) и не загружаются на сервер.
 - **Идентичность:** id пользователя берётся только из подписанных Telegram initData, а не из URL. Чужой плейлист выглядит как несуществующий (404).
-- **Секреты:** единственный секрет — `BOT_TOKEN`. Ключи аудиоссылок и секрет вебхука выводятся из него, поэтому `/revoke` в BotFather разом отзывает всё. Токен не попадает в логи.
+- **Секреты:** `BOT_TOKEN` и файлы cookies (если используются) — данные входа, их нельзя коммитить. Ключи аудиоссылок и секрет вебхука выводятся из `BOT_TOKEN`, поэтому `/revoke` в BotFather разом отзывает их. Токен и cookies не попадают в логи.
 - **Сервер:** контейнер работает не от root. Включены CSP и ограничение частоты запросов на поиск и воспроизведение.
 
 ## 10. Ограничения

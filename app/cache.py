@@ -13,9 +13,10 @@ Usage:
         url = resolve_expensive(...)
         cache_set("dQw4w9WgXcQ", url, ttl=7200)
 
-Why TTL = 2 hours:
-    YouTube CDN URLs expire in ~6 hours.  Using 2 h gives a 4-hour safety
-    margin so clients never receive a stale URL that stops mid-playback.
+Why TTL = 2 hours by default:
+    YouTube CDN URLs expire in ~6 hours.  app/resolver.py normally derives a
+    tighter TTL from the URL's ``expire`` parameter; 2 h remains the fallback
+    when that parameter is missing, giving a wide safety margin.
 """
 
 from __future__ import annotations

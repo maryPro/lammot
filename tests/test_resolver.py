@@ -27,6 +27,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.cache import cache_clear
+from app import resolver
 from app.resolver import get_stream_url, _PREFERRED_ITAG, _FALLBACK_ITAG, _ydl_opts
 
 # ---------------------------------------------------------------------------
@@ -408,3 +409,145 @@ class TestClientOptions:
     def test_no_format_hint_is_passed_to_ytdlp(self):
         """We select itag 251/140 ourselves; a format hint breaks SABR clients."""
         assert "format" not in _ydl_opts()
+
+
+# ---------------------------------------------------------------------------
+# Error classification, cache policy, cookie accounts, bot-check gate
+# ---------------------------------------------------------------------------
+
+class TestErrorClassification:
+    def test_bot_check_is_classified_and_not_retried(self):
+        def fake_ydl(_opts):
+            raise __import__("yt_dlp").utils.DownloadError(
+                "Sign in to confirm you're not a bot"
+            )
+
+        with patch("app.resolver.yt_dlp.YoutubeDL", side_effect=fake_ydl) as mock:
+            with pytest.raises(resolver.BotCheckError):
+                get_stream_url("dQw4w9WgXcQ")
+
+        assert mock.call_count == 1
+
+    def test_private_video_is_unavailable_and_not_retried(self):
+        def fake_ydl(_opts):
+            raise __import__("yt_dlp").utils.DownloadError("Private video")
+
+        with patch("app.resolver.yt_dlp.YoutubeDL", side_effect=fake_ydl) as mock:
+            with pytest.raises(resolver.VideoUnavailableError):
+                get_stream_url("dQw4w9WgXcQ")
+
+        assert mock.call_count == 1
+
+    def test_unknown_ytdlp_error_is_transient_and_retried(self):
+        def fake_ydl(_opts):
+            raise __import__("yt_dlp").utils.DownloadError("connection reset")
+
+        with patch("app.resolver.yt_dlp.YoutubeDL", side_effect=fake_ydl) as mock:
+            with pytest.raises(resolver.TransientResolveError):
+                get_stream_url("dQw4w9WgXcQ")
+
+        assert mock.call_count == 2
+
+
+class TestCachePolicy:
+    def test_ttl_is_derived_from_expire_with_safety_margin(self):
+        now = 1_800_000_000
+        url = "https://rr1---sn.googlevideo.com/videoplayback?expire=1800003600"
+        with patch("app.resolver.time.time", return_value=now):
+            assert resolver._ttl_for_url(url) == pytest.approx(1800)
+
+    def test_short_lived_url_is_not_cached(self):
+        now = 1_800_000_000
+        url = "https://rr1---sn.googlevideo.com/videoplayback?expire=1800000060"
+        with patch("app.resolver.time.time", return_value=now):
+            assert resolver._ttl_for_url(url) == 0
+
+    def test_ttl_is_capped_and_falls_back_for_missing_expire(self):
+        now = 1_800_000_000
+        long_url = "https://rr1---sn.googlevideo.com/videoplayback?expire=1800100000"
+        with patch("app.resolver.time.time", return_value=now):
+            assert resolver._ttl_for_url(long_url) == resolver._STREAM_TTL_MAX
+            assert resolver._ttl_for_url("https://rr1---sn.googlevideo.com/videoplayback") == resolver._STREAM_TTL
+
+    def test_negative_cache_avoids_a_second_extraction(self):
+        with patch(
+            "app.resolver._extract_formats",
+            side_effect=resolver.VideoUnavailableError("gone"),
+        ) as extract:
+            with pytest.raises(resolver.VideoUnavailableError):
+                get_stream_url("dQw4w9WgXcQ")
+            with pytest.raises(resolver.VideoUnavailableError):
+                get_stream_url("dQw4w9WgXcQ")
+
+        assert extract.call_count == 1
+
+
+class TestCookieAccounts:
+    def test_bot_check_switches_to_the_reserve_file(self, tmp_path, monkeypatch):
+        primary = tmp_path / "cookies.txt"
+        reserve = tmp_path / "cookies-reserve.txt"
+        primary.write_text("# primary")
+        reserve.write_text("# reserve")
+        monkeypatch.setenv("YTDLP_COOKIES_FILE", str(primary))
+        monkeypatch.setenv("YTDLP_RESERVE_COOKIES_FILE", str(reserve))
+
+        calls = []
+
+        def fake_extract(video_id, clients, cookiefile=None):
+            calls.append(cookiefile)
+            if cookiefile == str(primary):
+                raise resolver.BotCheckError("bot")
+            return _FORMATS_BOTH
+
+        with patch("app.resolver._extract_formats", side_effect=fake_extract):
+            url = get_stream_url("dQw4w9WgXcQ")
+
+        assert url == _FAKE_URL_251
+        assert calls == [str(primary), str(reserve)]
+        assert resolver.get_state()["active_account"] == "reserve"
+
+    def test_verify_cookiefile_uses_an_explicit_path(self, tmp_path):
+        path = str(tmp_path / "cookies.txt")
+        with patch("app.resolver._extract_formats", return_value=_FORMATS_BOTH) as extract:
+            assert resolver.verify_cookiefile(path, "dQw4w9WgXcQ") is True
+
+        assert extract.call_args.kwargs["cookiefile"] == path
+
+
+class TestBotCheckGate:
+    def test_active_bot_check_short_circuits_without_ytdlp(self):
+        resolver.set_status("bot_check")
+        with patch("app.resolver._extract_formats") as extract:
+            with pytest.raises(resolver.BotCheckError):
+                get_stream_url("dQw4w9WgXcQ")
+        extract.assert_not_called()
+
+    def test_force_bypasses_the_gate(self):
+        resolver.set_status("bot_check")
+        with patch("app.resolver._extract_formats", return_value=_FORMATS_BOTH):
+            assert get_stream_url("dQw4w9WgXcQ", force=True) == _FAKE_URL_251
+
+    def test_reset_state_clears_the_gate(self):
+        resolver.set_status("bot_check")
+        resolver.reset_state()
+        with patch("app.resolver._extract_formats", return_value=_FORMATS_BOTH):
+            assert get_stream_url("dQw4w9WgXcQ") == _FAKE_URL_251
+
+
+class TestOptionalOptions:
+    def test_cache_dir_and_pot_url_are_passed_only_when_configured(self, monkeypatch):
+        monkeypatch.setenv("YTDLP_CACHE_DIR", "/data/cache")
+        monkeypatch.setenv("BGUTIL_BASE_URL", "http://bgutil.railway.internal:4416")
+        opts = _ydl_opts()
+        assert opts["cachedir"] == "/data/cache"
+        assert opts["extractor_args"]["youtubepot-bgutilhttp"]["base_url"] == [
+            "http://bgutil.railway.internal:4416"
+        ]
+
+
+def test_cached_url_is_served_even_during_bot_check():
+    from app.cache import cache_set
+
+    resolver.set_status("bot_check")
+    cache_set("dQw4w9WgXcQ", _FAKE_URL_251, ttl=600)
+    assert get_stream_url("dQw4w9WgXcQ") == _FAKE_URL_251
