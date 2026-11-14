@@ -242,9 +242,9 @@ class TestAvailabilityGate:
     """
 
     def test_waits_until_format_available_at(self):
-        """A URL with available_at in the future is returned only after waiting."""
+        """A short pre-roll gate is still waited out before returning the URL."""
         now = 1_800_000_000
-        formats = [{"format_id": "251", "url": _FAKE_URL_251, "available_at": now + 5}]
+        formats = [{"format_id": "251", "url": _FAKE_URL_251, "available_at": now + 1.5}]
 
         with patch("app.resolver.yt_dlp.YoutubeDL", return_value=_make_ydl_mock(formats)), \
              patch("time.time", return_value=now), \
@@ -252,8 +252,21 @@ class TestAvailabilityGate:
             url = get_stream_url("dQw4w9WgXcQ")
 
         sleep.assert_called_once()
-        assert sleep.call_args.args[0] == pytest.approx(5)
+        assert sleep.call_args.args[0] == pytest.approx(1.5)
         assert url == _FAKE_URL_251
+
+    def test_gate_longer_than_the_cap_fails_fast(self):
+        """A 5 s pre-roll must not hold a thread pool worker: fail fast instead."""
+        now = 1_800_000_000
+        formats = [{"format_id": "251", "url": _FAKE_URL_251, "available_at": now + 5}]
+
+        with patch("app.resolver.yt_dlp.YoutubeDL", return_value=_make_ydl_mock(formats)), \
+             patch("time.time", return_value=now), \
+             patch("time.sleep") as sleep:
+            with pytest.raises(resolver.FormatUnavailableError, match="not available yet"):
+                get_stream_url("dQw4w9WgXcQ")
+
+        sleep.assert_not_called()
 
     def test_no_wait_when_available_at_is_absent_or_past(self):
         """No gate (or an already passed one) must not add any delay."""
@@ -348,8 +361,8 @@ class TestAvailabilityGate:
         assert url == _FAKE_URL_140
         sleep.assert_not_called()
 
-    def test_gate_retry_uses_ungated_duplicate(self):
-        """A second embedded-only extraction can remove a pre-roll gate."""
+    def test_falls_back_to_default_when_embedded_is_gated(self):
+        """Embedded is tried alone first; default is added only when it fails."""
         now = 1_800_000_000
         gated = [{"format_id": "251", "url": _FAKE_URL_251_LATE, "available_at": now + 6}]
         ungated = [{"format_id": "251", "url": _FAKE_URL_251_EARLY}]
@@ -365,8 +378,22 @@ class TestAvailabilityGate:
             url = get_stream_url("dQw4w9WgXcQ")
 
         assert url == _FAKE_URL_251_EARLY
-        assert calls == [["web_embedded", "default"], ["web_embedded"]]
+        assert calls == [["web_embedded"], ["web_embedded", "default"]]
         sleep.assert_not_called()
+
+    def test_no_fallback_pass_when_embedded_is_ready(self):
+        """The production regression: a usable embedded result must not be re-resolved."""
+        calls = []
+
+        def fake_ydl(opts):
+            calls.append(opts["extractor_args"]["youtube"]["player_client"])
+            return _make_ydl_mock(_FORMATS_BOTH)
+
+        with patch("app.resolver.yt_dlp.YoutubeDL", side_effect=fake_ydl):
+            url = get_stream_url("dQw4w9WgXcQ")
+
+        assert url == _FAKE_URL_251
+        assert calls == [["web_embedded"]]
 
     def test_concurrent_calls_resolve_once(self):
         """Single-flight: concurrent prefetch + click share one extraction."""
@@ -393,14 +420,14 @@ class TestAvailabilityGate:
 
 
 class TestClientOptions:
-    def test_prefers_embedded_client_with_default_fallback(self):
-        """
-        The embedded client has no pre-roll ad gate; defaults stay as a
-        fallback for videos where embedding is disabled or formats are missing.
-        """
+    def test_default_pass_uses_only_the_embedded_client(self):
+        """Embedded has no pre-roll gate, so it is the cheap first attempt."""
         clients = _ydl_opts()["extractor_args"]["youtube"]["player_client"]
-        assert clients[0] == "web_embedded"
-        assert "default" in clients
+        assert clients == ["web_embedded"]
+
+    def test_fallback_pass_adds_the_default_client(self):
+        """Videos where embedding is disabled still get the default clients."""
+        assert resolver._fallback_clients() == ("web_embedded", "default")
 
     def test_embedded_stage_uses_only_the_embedded_client(self):
         clients = _ydl_opts(["web_embedded"])["extractor_args"]["youtube"]["player_client"]
@@ -551,3 +578,38 @@ def test_cached_url_is_served_even_during_bot_check():
     resolver.set_status("bot_check")
     cache_set("dQw4w9WgXcQ", _FAKE_URL_251, ttl=600)
     assert get_stream_url("dQw4w9WgXcQ") == _FAKE_URL_251
+
+
+class TestCanaryIsolation:
+    """The canary must not occupy one of the two user resolve slots."""
+
+    def test_canary_uses_a_dedicated_semaphore(self):
+        canary_slot = MagicMock()
+        canary_slot.__enter__ = MagicMock(return_value=None)
+        canary_slot.__exit__ = MagicMock(return_value=False)
+        user_slot = MagicMock()
+        user_slot.__enter__ = MagicMock(return_value=None)
+        user_slot.__exit__ = MagicMock(return_value=False)
+
+        with patch("app.resolver._extract_formats", return_value=_FORMATS_BOTH), \
+             patch("app.resolver._CANARY_SEMAPHORE", canary_slot), \
+             patch("app.resolver._RESOLVE_SEMAPHORE", user_slot):
+            url = get_stream_url("dQw4w9WgXcQ", force=True, dedicated=True)
+
+        assert url == _FAKE_URL_251
+        canary_slot.__enter__.assert_called_once()
+        user_slot.__enter__.assert_not_called()
+
+    def test_user_resolve_keeps_the_shared_semaphore(self):
+        canary_slot = MagicMock()
+        user_slot = MagicMock()
+        user_slot.__enter__ = MagicMock(return_value=None)
+        user_slot.__exit__ = MagicMock(return_value=False)
+
+        with patch("app.resolver._extract_formats", return_value=_FORMATS_BOTH), \
+             patch("app.resolver._CANARY_SEMAPHORE", canary_slot), \
+             patch("app.resolver._RESOLVE_SEMAPHORE", user_slot):
+            get_stream_url("dQw4w9WgXcQ")
+
+        user_slot.__enter__.assert_called_once()
+        canary_slot.__enter__.assert_not_called()
