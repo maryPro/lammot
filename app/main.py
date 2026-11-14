@@ -431,6 +431,7 @@ async def audio_relay(
     range_header = request.headers.get("range")
     if range_header and not _RANGE_RE.match(range_header):
         raise HTTPException(status_code=416, detail="Unsupported Range header")
+    forced_range = not range_header
 
     client = _get_http()
     resp: Optional[httpx.Response] = None
@@ -446,6 +447,12 @@ async def audio_relay(
         headers = resolver.get_stream_headers(video_id, fmt)
         if range_header:
             headers["Range"] = range_header
+        else:
+            # Some webviews fetch media without a Range header.  A plain 200
+            # response gets buffered by the Cloudflare tunnel for many seconds,
+            # while a 206 streams immediately.  Ask the CDN for the first range
+            # so the relay always returns a streaming 206 response.
+            headers["Range"] = "bytes=0-"
         try:
             resp = await client.send(client.build_request("GET", cdn_url, headers=headers), stream=True)
         except httpx.HTTPError as exc:
@@ -475,7 +482,13 @@ async def audio_relay(
     }
     out_headers.setdefault("accept-ranges", "bytes")
     out_headers.setdefault("content-type", "audio/webm" if fmt == "opus" else "audio/mp4")
-    return StreamingResponse(_relay(resp), status_code=resp.status_code, headers=out_headers)
+    status_code = resp.status_code
+    if forced_range and status_code == 206:
+        # The client asked for the whole file: answer 200 and drop the
+        # Content-Range it never requested.
+        status_code = 200
+        out_headers.pop("content-range", None)
+    return StreamingResponse(_relay(resp), status_code=status_code, headers=out_headers)
 
 
 @app.get("/api/radio/{video_id}")

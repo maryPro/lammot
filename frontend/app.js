@@ -27,6 +27,7 @@
   const DEFAULT_ACCENT = '#BC13FE';
   const SEARCH_DEBOUNCE_MS = 300;
   const SEARCH_MIN_CHARS = 2;
+  const SEARCH_PREFETCH_COUNT = 3;  // warm the first results while the user decides
   const QUEUE_VISIBLE = 5;
   const PREFETCH_SECONDS = 15;     // resolve the next song this long before the end
   const RADIO_BATCH = 5;
@@ -361,6 +362,16 @@
       h('span', { class: 'track-artist', text: track.artist || 'Unknown artist' })),
     track.duration_seconds ? h('span', { class: 'track-dur', text: fmtTime(track.duration_seconds) }) : null);
 
+    // Warm the stream link on hover/touch/focus. A tap then reuses the same
+    // in-flight request instead of resolving the track twice.
+    let hoverTimer = 0;
+    main.addEventListener('pointerenter', () => {
+      hoverTimer = setTimeout(() => prefetchTrack(track), 300);
+    });
+    main.addEventListener('pointerleave', () => clearTimeout(hoverTimer));
+    main.addEventListener('focus', () => prefetchTrack(track));
+    main.addEventListener('touchstart', () => prefetchTrack(track), { passive: true });
+
     const row = h('li', { class: 'track', 'data-track': track.video_id }, main);
     if (player.current && player.current.video_id === track.video_id) row.classList.add('is-current');
     if (opts.variant === 'search' || opts.variant === 'shared') row.append(favButton(track));
@@ -596,6 +607,7 @@
       const results = await api(`/api/search?q=${encodeURIComponent(q)}&limit=20`, { signal: searchController.signal });
       if (seq !== searchSeq) return;
       state.search = { q, status: 'done', results: results || [], error: '' };
+      prefetchSearchResults(results);
     } catch (err) {
       if (err && err.name === 'AbortError') return;
       if (seq !== searchSeq) return;
@@ -1066,6 +1078,7 @@
     source: '',
     loadSeq: 0,
     links: new Map(),   // `${video_id}:${format}` → { url, expires }
+    inflight: new Map(), // `${video_id}:${format}` → Promise (dedupe prefetch/click)
     refilling: false,
     recorded: false,
     format: AUDIO_FORMAT,
@@ -1080,9 +1093,30 @@
     const key = `${track.video_id}:${format}`;
     const cached = player.links.get(key);
     if (cached && cached.expires > Date.now()) return cached.url;
-    const data = await api(`/api/stream/${encodeURIComponent(track.video_id)}?format=${format}`);
-    player.links.set(key, { url: data.stream_url, expires: Date.now() + LINK_LIFETIME_MS });
-    return data.stream_url;
+    const pending = player.inflight.get(key);
+    if (pending) return pending;
+
+    const request = api(`/api/stream/${encodeURIComponent(track.video_id)}?format=${format}`)
+      .then((data) => {
+        player.links.set(key, { url: data.stream_url, expires: Date.now() + LINK_LIFETIME_MS });
+        return data.stream_url;
+      })
+      .finally(() => {
+        player.inflight.delete(key);
+      });
+    player.inflight.set(key, request);
+    return request;
+  }
+
+  function prefetchTrack(track, format = AUDIO_FORMAT) {
+    if (!track || !track.video_id) return;
+    const cached = player.links.get(`${track.video_id}:${format}`);
+    if (cached && cached.expires > Date.now()) return;
+    streamLink(track, format).catch(() => {});
+  }
+
+  function prefetchSearchResults(results) {
+    (results || []).slice(0, SEARCH_PREFETCH_COUNT).forEach((track) => prefetchTrack(track));
   }
 
   function setLoading(on) {
