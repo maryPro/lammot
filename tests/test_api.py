@@ -9,6 +9,7 @@ the Bot API call is an AsyncMock. Each test gets its own temporary database.
 import hashlib
 import hmac
 import json
+import re
 import time
 import urllib.parse
 from unittest.mock import AsyncMock, patch
@@ -140,6 +141,13 @@ async def test_stream_returns_signed_same_origin_link(client, headers):
     m.assert_called_once_with(VID, "opus")
 
 
+async def test_stream_reports_server_timing(client, headers):
+    with patch("app.main.resolver.get_stream_url", return_value=CDN_URL):
+        r = await client.get(f"/api/stream/{VID}", headers=headers)
+    assert r.status_code == 200
+    assert re.match(r"resolve;dur=\d+(\.\d+)?$", r.headers["server-timing"])
+
+
 async def test_stream_aac_format(client, headers):
     with patch("app.main.resolver.get_stream_url", return_value=CDN_URL) as m:
         r = await client.get(f"/api/stream/{VID}?format=aac", headers=headers)
@@ -218,6 +226,20 @@ async def test_audio_relay_passes_range(client, headers, cdn):
     assert r.headers["accept-ranges"] == "bytes"
     assert str(seen[0].url) == CDN_URL
     assert seen[0].headers["range"] == "bytes=0-3"
+
+
+async def test_audio_relay_reports_server_timing(client, headers, cdn):
+    seen, answers = cdn
+    answers.append((206, {"content-type": "audio/webm"}, b"OPUS"))
+    link = await _audio_link(client, headers)
+
+    with patch("app.main.resolver.get_stream_url", return_value=CDN_URL):
+        r = await client.get(link, headers={"Range": "bytes=0-3"})
+
+    assert r.status_code == 206
+    timing = r.headers["server-timing"]
+    assert re.search(r"resolve;dur=\d+(\.\d+)?", timing)
+    assert re.search(r"cdn;dur=\d+(\.\d+)?", timing)
 
 
 async def test_audio_relay_reresolves_once_on_403(client, headers, cdn):

@@ -380,6 +380,8 @@
     const row = h('li', { class: 'track', 'data-track': track.video_id }, main);
     if (player.current && player.current.video_id === track.video_id) row.classList.add('is-current');
     if (opts.variant === 'search' || opts.variant === 'shared') row.append(favButton(track));
+    // Warm tracks as soon as they scroll into view, not only on touch.
+    observePrefetch(row, track);
 
     const more = h('button', { class: 'icon-btn more-btn', type: 'button', 'aria-label': `More actions for ${track.title}` }, icon('more'));
     more.addEventListener('click', (e) => { e.stopPropagation(); openTrackMenu(track, opts); });
@@ -1113,11 +1115,60 @@
     return request;
   }
 
+  // Prefetch is bounded: a tap must never queue behind background work, and
+  // extra resolves raise the risk of a YouTube bot check.
+  const PREFETCH_LIMIT = 2;
+  const PREFETCH_DELAY_MS = 200;
+  const prefetchQueue = [];
+  const prefetchTracks = new WeakMap();
+  let prefetchObserver = null;
+  let prefetchActive = 0;
+
+  function runPrefetchQueue() {
+    if (player.botCheck) { prefetchQueue.length = 0; return; }
+    while (prefetchActive < PREFETCH_LIMIT && prefetchQueue.length) {
+      const track = prefetchQueue.shift();
+      prefetchActive += 1;
+      streamLink(track, AUDIO_FORMAT)
+        .catch((err) => {
+          if (err instanceof ApiError && err.code === 'bot_check') {
+            player.botCheck = true;
+            prefetchQueue.length = 0;
+          }
+        })
+        .finally(() => {
+          prefetchActive -= 1;
+          runPrefetchQueue();
+        });
+    }
+  }
+
   function prefetchTrack(track, format = AUDIO_FORMAT) {
     if (!track || !track.video_id || player.botCheck) return;
-    const cached = player.links.get(`${track.video_id}:${format}`);
+    if (format !== AUDIO_FORMAT) return streamLink(track, format).catch(() => {});
+    const key = `${track.video_id}:${format}`;
+    const cached = player.links.get(key);
     if (cached && cached.expires > Date.now()) return;
-    streamLink(track, format).catch(() => {});
+    if (player.inflight.has(key)) return;
+    if (prefetchQueue.some((t) => t.video_id === track.video_id)) return;
+    prefetchQueue.push(track);
+    runPrefetchQueue();
+  }
+
+  function observePrefetch(row, track) {
+    if (!('IntersectionObserver' in window)) return;
+    if (!prefetchObserver) {
+      prefetchObserver = new IntersectionObserver((entries) => {
+        for (const entry of entries) {
+          if (!entry.isIntersecting) continue;
+          prefetchObserver.unobserve(entry.target);
+          const t = prefetchTracks.get(entry.target);
+          if (t) setTimeout(() => prefetchTrack(t), PREFETCH_DELAY_MS);
+        }
+      }, { rootMargin: '120px' });
+    }
+    prefetchTracks.set(row, track);
+    prefetchObserver.observe(row);
   }
 
   function setLoading(on) {
@@ -1218,8 +1269,9 @@
     player.mode = 'radio';
     player.source = 'Radio: similar songs';
     player.queue = [];
+    // startTrack() refills the queue after playback starts, so the radio
+    // resolve never competes with the track the user just tapped.
     startTrack(track);
-    refillRadio(true);
   }
 
   function playList(tracks, index, sourceName) {

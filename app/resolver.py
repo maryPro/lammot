@@ -91,15 +91,16 @@ _BOT_CHECK_COOLDOWN: float = 60
 # (the detected pre-roll ad length): requesting it earlier yields HTTP 403.
 # Normally this is a few seconds; anything longer means a premiere or an
 # unusually long ad, so fail fast instead of holding a thread pool worker.
-_MAX_AVAILABILITY_WAIT: float = 30.0
+# Keeping the cap short also stops a single gated track from adding 10-20 s to
+# tap-to-play; _select_format tries a shorter-gated itag before we wait.
+_MAX_AVAILABILITY_WAIT: float = 2.0
 
-# Resolver client strategy.  The embedded client is asked first in the normal
-# extraction; if the selected format is still gated for more than
-# _GATE_RETRY_THRESHOLD seconds, one extra embedded-only extraction is tried
-# because pre-roll ads are assigned per response and often disappear on retry.
+# Resolver client strategy.  The embedded client is tried alone first: it has
+# no pre-roll gate for most tracks and is cheaper than merging every client.
+# Only when it yields no usable format do we pay for one pass with the default
+# client set (some videos disable embedding or expose formats only there).
 _EMBEDDED_CLIENTS: Tuple[str, ...] = ("web_embedded",)
 _DEFAULT_CLIENTS: Tuple[str, ...] = ("web_embedded", "default")
-_GATE_RETRY_THRESHOLD: float = 3.0
 
 # When the preferred Opus stream is gated but AAC is not, prefer the immediate
 # AAC stream if it saves at least this many seconds.  AAC is playable
@@ -129,6 +130,10 @@ def _env_float(name: str, default: float) -> float:
 
 _RESOLVE_CONCURRENCY = _env_int("YTDLP_RESOLVE_CONCURRENCY", 2)
 _RESOLVE_SEMAPHORE = threading.BoundedSemaphore(_RESOLVE_CONCURRENCY)
+# The canary gets its own single slot: a scheduled health check must never
+# occupy one of the user resolve slots (a tap and the radio prefetch already
+# use both of them).
+_CANARY_SEMAPHORE = threading.BoundedSemaphore(1)
 _MIN_RESOLVE_INTERVAL = _env_float("YTDLP_MIN_RESOLVE_INTERVAL", 0.0)
 _RESOLVE_PACING_LOCK = threading.Lock()
 _last_resolve_at = 0.0
@@ -298,12 +303,17 @@ def _record_failure(exc: Exception) -> None:
 # ---------------------------------------------------------------------------
 
 def _configured_clients() -> Tuple[str, ...]:
-    """Player clients, overridable in production without a code change."""
+    """Player clients for the first (cheap) pass, overridable in production."""
     raw = os.getenv("YTDLP_PLAYER_CLIENTS", "").strip()
     if raw:
         clients = tuple(c.strip() for c in raw.split(",") if c.strip())
         if clients:
             return clients
+    return _EMBEDDED_CLIENTS
+
+
+def _fallback_clients() -> Tuple[str, ...]:
+    """Clients used only when the first pass yields no immediately usable format."""
     return _DEFAULT_CLIENTS
 
 
@@ -509,6 +519,11 @@ def _extract_formats(
     return (info or {}).get("formats") or []
 
 
+def _usable_now(fmt: Optional[dict]) -> bool:
+    """True when *fmt* needs no significant gate wait."""
+    return fmt is not None and _gate_wait(fmt) <= _MAX_AVAILABILITY_WAIT
+
+
 def _resolve_via_ytdlp(
     video_id: str,
     prefer: str = "opus",
@@ -517,6 +532,11 @@ def _resolve_via_ytdlp(
     """
     Call yt-dlp to extract audio format information for *video_id*.
 
+    The embedded client is tried alone first because it usually carries no
+    pre-roll gate and avoids the cost of merging formats from every client.
+    Only when that pass has no format usable within _MAX_AVAILABILITY_WAIT do
+    we run one fallback pass with _DEFAULT_CLIENTS.
+
     Returns (CDN URL, HTTP headers to send with it).
 
     Raises
@@ -524,36 +544,44 @@ def _resolve_via_ytdlp(
     BotCheckError, VideoUnavailableError, FormatUnavailableError,
     TransientResolveError
     """
+    started = time.perf_counter()
+    clients = _configured_clients()
     first_error: Optional[ResolverError] = None
+    formats: list[dict] = []
+    extract_calls = 0
+
     try:
-        formats = _extract_formats(video_id, _configured_clients(), cookiefile)
+        formats = _extract_formats(video_id, clients, cookiefile)
+        extract_calls += 1
     except (BotCheckError, VideoUnavailableError):
-        # Both are IP/account or video-wide: another embedded-only extraction
-        # cannot fix them and only adds load on YouTube.
+        # Both are IP/account or video-wide: another extraction cannot fix
+        # them and only adds load on YouTube.
         raise
     except (FormatUnavailableError, TransientResolveError) as exc:
         first_error = exc
-        formats = []
 
     fmt = _select_format(formats, prefer)
 
-    # A gated stream usually means YouTube attached a pre-roll ad to this
-    # response.  Ads are per-response, so one embedded-only retry often yields
-    # the same itag without a gate and removes the wait entirely.
-    if fmt is None or _gate_wait(fmt) > _GATE_RETRY_THRESHOLD:
+    if not _usable_now(fmt):
+        fallback = _fallback_clients()
         logger.info(
-            "Resolver: first pass unusable for %s (gate=%.1fs), retrying embedded",
+            "Resolver: %s: clients=%s unusable (gate=%.1fs), trying fallback",
             video_id,
+            ",".join(clients),
             _gate_wait(fmt) if fmt else -1.0,
         )
+        clients = fallback
         second_error: Optional[ResolverError] = None
         try:
-            extra = _extract_formats(video_id, _EMBEDDED_CLIENTS, cookiefile)
+            extra = _extract_formats(video_id, fallback, cookiefile)
+            extract_calls += 1
         except (BotCheckError, VideoUnavailableError):
             raise
         except (FormatUnavailableError, TransientResolveError) as exc:
             second_error = exc
         else:
+            # Merging keeps the earliest-gated duplicate of the same itag,
+            # so an ungated duplicate from the fallback wins.
             fmt = _select_format(formats + extra, prefer)
         if fmt is None and second_error is not None:
             raise second_error
@@ -565,6 +593,18 @@ def _resolve_via_ytdlp(
             f"No supported audio format (itag 251 or 140) found "
             f"for video_id={video_id!r}"
         )
+
+    logger.info(
+        "Resolver: %s outcome=%s clients=%s passes=%d extract_ms=%.0f "
+        "gate_ms=%.0f itag=%s",
+        video_id,
+        "ready" if _usable_now(fmt) else "gated",
+        ",".join(clients),
+        extract_calls,
+        (time.perf_counter() - started) * 1000,
+        _gate_wait(fmt) * 1000,
+        fmt.get("format_id"),
+    )
 
     _wait_until_available(fmt)
 
@@ -675,6 +715,7 @@ def get_stream_url(
     prefer: str = "opus",
     force: bool = False,
     cookiefile: Optional[str] = None,
+    dedicated: bool = False,
 ) -> str:
     """
     Return a direct HTTPS audio CDN URL for a YouTube video.
@@ -692,6 +733,9 @@ def get_stream_url(
     cookiefile:
         Use this explicit cookies file instead of the configured accounts.
         Used by /cookies validation.
+    dedicated:
+        Use the canary's own semaphore instead of the shared user slots.
+        Used by the canary so it never delays a tap.
 
     Raises
     ------
@@ -741,7 +785,8 @@ def get_stream_url(
                 raise BotCheckError("YouTube bot check is active; resolver paused")
 
         logger.info("Resolver: cache miss — resolving via yt-dlp for %s", key)
-        with _RESOLVE_SEMAPHORE:
+        semaphore = _CANARY_SEMAPHORE if dedicated else _RESOLVE_SEMAPHORE
+        with semaphore:
             _pace_resolve()
             try:
                 stream_url, headers, _account = _resolve_with_accounts(

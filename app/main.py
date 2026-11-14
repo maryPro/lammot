@@ -222,7 +222,9 @@ async def _run_canary_once() -> None:
     results: List[str] = []
     for video_id in video_ids:
         try:
-            await run_in_threadpool(resolver.get_stream_url, video_id, "opus", True)
+            await run_in_threadpool(
+                resolver.get_stream_url, video_id, "opus", True, dedicated=True
+            )
             results.append("ok")
         except resolver.BotCheckError:
             results.append("bot_check")
@@ -561,6 +563,7 @@ async def api_search(
 
 @app.get("/api/stream/{video_id}")
 async def api_stream(
+    response: Response,
     video_id: str = Path(..., pattern=VIDEO_ID_PATTERN),
     fmt: str = Query("opus", alias="format", pattern="^(opus|aac)$"),
     user: auth.TelegramUser = Depends(current_user),
@@ -570,6 +573,7 @@ async def api_stream(
     signed same-origin link the <audio> tag can play.
     """
     stream_limiter.check(user.id)
+    started = time.perf_counter()
     try:
         await run_in_threadpool(resolver.get_stream_url, video_id, fmt)
     except resolver.BotCheckError:
@@ -596,6 +600,12 @@ async def api_stream(
         return _error_response(502, "upstream_error", "Stream service unavailable")
     await _alert_on_transition()
 
+    resolve_ms = (time.perf_counter() - started) * 1000
+    logger.info(
+        "api_stream video_id=%s format=%s resolve_ms=%.0f", video_id, fmt, resolve_ms
+    )
+    response.headers["Server-Timing"] = f"resolve;dur={resolve_ms:.1f}"
+
     token = auth.sign_audio_token(AUDIO_KEY, video_id, fmt, user.id, AUDIO_LINK_TTL)
     return _ok({
         "video_id": video_id,
@@ -604,12 +614,35 @@ async def api_stream(
     })
 
 
-async def _relay(resp: httpx.Response) -> AsyncIterator[bytes]:
+async def _relay(
+    resp: httpx.Response,
+    video_id: str = "",
+    fmt: str = "",
+    resolve_ms: float = 0.0,
+    cdn_ms: float = 0.0,
+) -> AsyncIterator[bytes]:
+    started = time.perf_counter()
+    first_chunk_ms: Optional[float] = None
+    total_bytes = 0
     try:
         async for chunk in resp.aiter_raw():
+            if first_chunk_ms is None:
+                first_chunk_ms = (time.perf_counter() - started) * 1000
+            total_bytes += len(chunk)
             yield chunk
     finally:
         await resp.aclose()
+        logger.info(
+            "audio_relay video_id=%s format=%s resolve_ms=%.0f cdn_ms=%.0f "
+            "first_chunk_ms=%.0f total_ms=%.0f bytes=%d",
+            video_id,
+            fmt,
+            resolve_ms,
+            cdn_ms,
+            first_chunk_ms if first_chunk_ms is not None else -1.0,
+            (time.perf_counter() - started) * 1000,
+            total_bytes,
+        )
 
 
 @app.get("/audio/{video_id}", include_in_schema=False)
@@ -627,6 +660,10 @@ async def audio_relay(
     except auth.AuthError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from None
 
+    logger.info("audio_start video_id=%s format=%s", video_id, fmt)
+    resolve_ms = 0.0
+    cdn_ms = 0.0
+
     range_header = request.headers.get("range")
     if range_header and not _RANGE_RE.match(range_header):
         raise HTTPException(status_code=416, detail="Unsupported Range header")
@@ -635,6 +672,7 @@ async def audio_relay(
     client = _get_http()
     resp: Optional[httpx.Response] = None
     for attempt in (1, 2):
+        resolve_started = time.perf_counter()
         try:
             cdn_url = await run_in_threadpool(resolver.get_stream_url, video_id, fmt)
         except resolver.BotCheckError:
@@ -652,6 +690,7 @@ async def audio_relay(
             logger.exception("Audio: resolve failed for video_id=%s", video_id)
             raise HTTPException(status_code=502, detail="Audio source unavailable")
 
+        resolve_ms = (time.perf_counter() - resolve_started) * 1000
         headers = resolver.get_stream_headers(video_id, fmt)
         if range_header:
             headers["Range"] = range_header
@@ -661,11 +700,13 @@ async def audio_relay(
             # while a 206 streams immediately.  Ask the CDN for the first range
             # so the relay always returns a streaming 206 response.
             headers["Range"] = "bytes=0-"
+        cdn_started = time.perf_counter()
         try:
             resp = await client.send(client.build_request("GET", cdn_url, headers=headers), stream=True)
         except httpx.HTTPError as exc:
             logger.warning("Audio: CDN request failed for video_id=%s: %s", video_id, type(exc).__name__)
             raise HTTPException(status_code=502, detail="Audio source unavailable") from None
+        cdn_ms = (time.perf_counter() - cdn_started) * 1000
 
         if resp.status_code in (403, 410) and attempt == 1:
             # URL expired or was revoked: forget it and resolve again once
@@ -690,13 +731,20 @@ async def audio_relay(
     }
     out_headers.setdefault("accept-ranges", "bytes")
     out_headers.setdefault("content-type", "audio/webm" if fmt == "opus" else "audio/mp4")
+    out_headers["Server-Timing"] = (
+        f"resolve;dur={resolve_ms:.1f}, cdn;dur={cdn_ms:.1f}"
+    )
     status_code = resp.status_code
     if forced_range and status_code == 206:
         # The client asked for the whole file: answer 200 and drop the
         # Content-Range it never requested.
         status_code = 200
         out_headers.pop("content-range", None)
-    return StreamingResponse(_relay(resp), status_code=status_code, headers=out_headers)
+    return StreamingResponse(
+        _relay(resp, video_id, fmt, resolve_ms, cdn_ms),
+        status_code=status_code,
+        headers=out_headers,
+    )
 
 
 @app.get("/api/radio/{video_id}")
