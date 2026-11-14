@@ -127,6 +127,9 @@ _bot_username: Optional[str] = BOT_USERNAME
 # replace it and so importing the module does not open sockets.
 # ---------------------------------------------------------------------------
 _http_client: Optional[httpx.AsyncClient] = None
+# Strong references to fire-and-forget CDN warm-up tasks, so the event loop
+# does not garbage-collect them before they finish.
+_warm_tasks: set[asyncio.Task] = set()
 
 
 def _get_http() -> httpx.AsyncClient:
@@ -138,6 +141,45 @@ def _get_http() -> httpx.AsyncClient:
             limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
         )
     return _http_client
+
+
+async def _warm_cdn(url: str, headers: Dict[str, str]) -> None:
+    """
+    Send a 1-byte Range request to the CDN URL returned by the resolver.
+
+    This happens after /api/stream has already answered, while the frontend
+    is still setting ``audio.src``.  It opens the DNS/TLS/HTTP connection and
+    fills the shared keep-alive pool, so the first /audio request does not pay
+    that cost.  Never logs the URL or headers.
+    """
+    if not url:
+        return
+    warm_headers = dict(headers)
+    warm_headers["Range"] = "bytes=0-1"
+    client = _get_http()
+    started = time.perf_counter()
+    try:
+        resp = await client.send(
+            client.build_request("GET", url, headers=warm_headers), stream=True
+        )
+        try:
+            logger.info(
+                "cdn_warm status=%s ttfb_ms=%.0f",
+                resp.status_code,
+                (time.perf_counter() - started) * 1000,
+            )
+        finally:
+            await resp.aclose()
+    except httpx.HTTPError as exc:
+        logger.debug("cdn_warm failed: %s", type(exc).__name__)
+    except Exception as exc:  # a warm-up must never break a request path
+        logger.debug("cdn_warm failed: %s", type(exc).__name__)
+
+
+def _schedule_cdn_warm(url: str, headers: Dict[str, str]) -> None:
+    task = asyncio.create_task(_warm_cdn(url, headers))
+    _warm_tasks.add(task)
+    task.add_done_callback(_warm_tasks.discard)
 
 
 def _owner_tg_id() -> Optional[int]:
@@ -575,7 +617,7 @@ async def api_stream(
     stream_limiter.check(user.id)
     started = time.perf_counter()
     try:
-        await run_in_threadpool(resolver.get_stream_url, video_id, fmt)
+        cdn_url = await run_in_threadpool(resolver.get_stream_url, video_id, fmt)
     except resolver.BotCheckError:
         logger.warning(
             "Stream: bot check video_id=%s format=%s", video_id, fmt
@@ -605,6 +647,10 @@ async def api_stream(
         "api_stream video_id=%s format=%s resolve_ms=%.0f", video_id, fmt, resolve_ms
     )
     response.headers["Server-Timing"] = f"resolve;dur={resolve_ms:.1f}"
+
+    # The browser will ask /audio in a moment; warm DNS/TLS/keep-alive now
+    # so the relay's first CDN request is faster.  Never blocks this response.
+    _schedule_cdn_warm(cdn_url, resolver.get_stream_headers(video_id, fmt))
 
     token = auth.sign_audio_token(AUDIO_KEY, video_id, fmt, user.id, AUDIO_LINK_TTL)
     return _ok({
