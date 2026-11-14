@@ -6,6 +6,7 @@ patched where app.main looks them up, the CDN is an httpx.MockTransport and
 the Bot API call is an AsyncMock. Each test gets its own temporary database.
 """
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -207,7 +208,10 @@ async def cdn(monkeypatch):
 
 
 async def _audio_link(client, headers, vid=VID):
-    with patch("app.main.resolver.get_stream_url", return_value=CDN_URL):
+    # The CDN warm-up starts a separate request; disable it here so the fake
+    # CDN's answer queue belongs to the relay request under test.
+    with patch("app.main.resolver.get_stream_url", return_value=CDN_URL), \
+         patch("app.main._schedule_cdn_warm"):
         r = await client.get(f"/api/stream/{vid}", headers=headers)
     return r.json()["data"]["stream_url"]
 
@@ -240,6 +244,40 @@ async def test_audio_relay_reports_server_timing(client, headers, cdn):
     timing = r.headers["server-timing"]
     assert re.search(r"resolve;dur=\d+(\.\d+)?", timing)
     assert re.search(r"cdn;dur=\d+(\.\d+)?", timing)
+
+
+async def test_warm_cdn_requests_first_byte(cdn):
+    seen, answers = cdn
+    answers.append((206, {"content-type": "audio/webm"}, b"X"))
+
+    await main._warm_cdn(CDN_URL, {"User-Agent": "test"})
+
+    assert len(seen) == 1
+    assert str(seen[0].url) == CDN_URL
+    assert seen[0].headers["range"] == "bytes=0-1"
+
+
+async def test_warm_cdn_ignores_errors(cdn):
+    seen, answers = cdn
+    answers.append((403, {}, b""))
+
+    await main._warm_cdn(CDN_URL, {})
+
+    assert len(seen) == 1
+
+
+async def test_stream_schedules_cdn_warm(client, headers, cdn):
+    seen, answers = cdn
+    answers.append((206, {"content-type": "audio/webm"}, b"X"))
+
+    with patch("app.main.resolver.get_stream_url", return_value=CDN_URL):
+        r = await client.get(f"/api/stream/{VID}", headers=headers)
+
+    assert r.status_code == 200
+    await asyncio.sleep(0)
+    await asyncio.gather(*tuple(main._warm_tasks))
+    assert len(seen) == 1
+    assert seen[0].headers["range"] == "bytes=0-1"
 
 
 async def test_audio_relay_reresolves_once_on_403(client, headers, cdn):

@@ -108,6 +108,9 @@ pytest -m integration -v
 4. **Volume** (обязательно): добавь к сервису Volume с mount path **`/data`**. Без него база стирается при каждом деплое.
 5. Сделай **Redeploy**. В **Deploy Logs** должна быть строка `Telegram webhook and menu button set for ...`, а `https://<домен>/healthz` должен отвечать `{"ok":true}`.
 
+Переезд в другой регион (новый volume, перенос БД и cookies, cutover) —
+[docs/eu-migration.md](docs/eu-migration.md).
+
 **Деньги.** Railway считает CPU, память, диск и исходящий трафик. Музыка идёт через сервер (так устроен аудио-прокси, см. ARCHITECTURE.md), это примерно 5 МБ трафика на песню. Пробный период даёт немного кредитов, дальше для постоянной работы реалистичен план Hobby. Актуальные цены смотри на railway.com.
 
 ---
