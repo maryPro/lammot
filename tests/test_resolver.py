@@ -22,6 +22,7 @@ from __future__ import annotations
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -481,6 +482,52 @@ class TestAvailabilityGate:
         assert urls[0] == _FAKE_URL_251
 
 
+class TestMemoryBudget:
+    """Three yt-dlp/Deno extractions must remain under the 1 GB container."""
+
+    def test_deno_solver_heap_is_capped_in_the_image(self):
+        """Without a V8 cap one Deno process peaks around 340 MB."""
+        dockerfile = (Path(__file__).resolve().parent.parent / "Dockerfile").read_text(
+            encoding="utf-8"
+        )
+        assert "DENO_V8_FLAGS=--max-old-space-size=160,--max-semi-space-size=1" in dockerfile
+
+    def test_extraction_cap_is_three(self):
+        assert resolver._EXTRACT_CONCURRENCY == 3
+        assert resolver._EXTRACT_POOL._max_workers == resolver._EXTRACT_CONCURRENCY
+
+    def test_extract_formats_never_runs_more_than_three_ytdlp_jobs(self):
+        """The cap also covers canary/cookie validation, not only the race pool."""
+        active = 0
+        peak = 0
+        state_lock = threading.Lock()
+        start = threading.Barrier(6)
+
+        def fake_extract_info(_url, download=False):
+            nonlocal active, peak
+            assert download is False
+            with state_lock:
+                active += 1
+                peak = max(peak, active)
+            time.sleep(0.1)
+            with state_lock:
+                active -= 1
+            return {"formats": _FORMATS_BOTH}
+
+        mock_ydl = _make_ydl_mock(_FORMATS_BOTH)
+        mock_ydl.extract_info.side_effect = fake_extract_info
+
+        def worker():
+            start.wait()
+            return resolver._extract_formats("dQw4w9WgXcQ", ("web",))
+
+        with patch("app.resolver.yt_dlp.YoutubeDL", return_value=mock_ydl):
+            with ThreadPoolExecutor(max_workers=6) as pool:
+                list(pool.map(lambda _: worker(), range(6)))
+
+        assert peak <= resolver._EXTRACT_CONCURRENCY
+
+
 class TestClientOptions:
     def test_default_pass_uses_the_web_client(self):
         """The web client's muxed MP4 is usually free of a pre-roll gate."""
@@ -752,8 +799,8 @@ class TestParallelResolution:
     def test_all_gated_merges_and_waits_for_the_earliest_gate(self):
         now = 1_800_000_000
         web = [{"format_id": "18", "url": _FAKE_URL_18, "available_at": now + 8}]
-        embedded = [{"format_id": "140", "url": _FAKE_URL_140, "available_at": now + 4}]
-        default = [{"format_id": "140", "url": _FAKE_URL_140, "available_at": now + 6}]
+        embedded = [{"format_id": "140", "url": _FAKE_URL_140, "available_at": now + 2}]
+        default = [{"format_id": "140", "url": _FAKE_URL_140, "available_at": now + 2.5}]
         by_clients = self._by_clients(web, embedded, default)
 
         def fake_extract(_video_id, clients, _cookiefile=None):
@@ -766,7 +813,25 @@ class TestParallelResolution:
 
         assert url == _FAKE_URL_140
         sleep.assert_called_once()
-        assert sleep.call_args.args[0] == pytest.approx(4.0)
+        assert sleep.call_args.args[0] == pytest.approx(2.0)
+
+    def test_race_starts_all_three_client_sets_together(self):
+        """All three sets must be in flight before the first one can finish."""
+        barrier = threading.Barrier(len(resolver._FAST_CLIENT_SETS), timeout=2)
+        started = []
+        started_lock = threading.Lock()
+
+        def fake_extract(_video_id, clients, _cookiefile=None):
+            with started_lock:
+                started.append(clients)
+            barrier.wait()
+            return _FORMATS_BOTH
+
+        with patch("app.resolver._extract_formats", side_effect=fake_extract):
+            url, _headers = resolver._resolve_parallel("dQw4w9WgXcQ", "aac")
+
+        assert url == _FAKE_URL_140
+        assert set(started) == set(resolver._FAST_CLIENT_SETS)
 
     def test_all_clients_gated_beyond_the_tap_cap_fail(self):
         now = 1_800_000_000
@@ -815,12 +880,15 @@ class TestParallelResolution:
         race.assert_not_called()
         serial.assert_called_once()
 
-    def test_tap_uses_the_long_gate_cap(self, monkeypatch):
+    def test_tap_uses_the_three_second_budget(self, monkeypatch):
         monkeypatch.setattr(resolver, "_PARALLEL_RESOLVE", True)
         with patch("app.resolver._resolve_parallel", return_value=(_FAKE_URL_18, {})) as race:
             get_stream_url("dQw4w9WgXcQ")
 
-        assert race.call_args.args[3] == resolver._MAX_TAP_GATE_WAIT
+        assert resolver._TAP_RESOLVE_BUDGET == 3.0
+        assert race.call_args.args[3] == pytest.approx(
+            resolver._TAP_RESOLVE_BUDGET, abs=0.01
+        )
 
 
 class TestGateCache:

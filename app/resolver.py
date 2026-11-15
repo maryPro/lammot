@@ -95,15 +95,15 @@ _BOT_CHECK_COOLDOWN: float = 60
 # (the detected pre-roll ad length): requesting it earlier yields HTTP 403.
 # Normally this is a few seconds; anything longer means a premiere or an
 # unusually long ad, so fail fast instead of holding a thread pool worker.
-# Keeping the cap short also stops a single gated track from adding 10-20 s to
-# tap-to-play; _select_format tries a shorter-gated itag before we wait.
+# Keeping the cap short also stops a single gated track from adding a long
+# pre-roll delay; _select_format tries a shorter-gated itag before we wait.
 _MAX_AVAILABILITY_WAIT: float = 2.0
 
-# Prefetch/canary fail fast at _MAX_AVAILABILITY_WAIT so they do not hold a
-# resolve slot or the per-key lock through a long pre-roll.  A user tap, on the
-# other hand, is better served by waiting a few seconds than by skipping the
-# track, so the parallel tap path allows this longer gate.
-_MAX_TAP_GATE_WAIT: float = 10.0
+# Hard budget for an interactive tap.  All client sets race in parallel and
+# the resolver returns or fails within this budget, covering both the yt-dlp
+# extraction and any pre-roll gate wait.  Without it a gated track could sleep
+# for 10-20 s before playback starts.
+_TAP_RESOLVE_BUDGET: float = 3.0
 
 # Resolver client strategy.  The plain web client is tried first: its muxed
 # 360p MP4 (itag 18) is served without a pre-roll gate, so playback starts
@@ -156,14 +156,18 @@ def _env_float(name: str, default: float) -> float:
 
 _RESOLVE_CONCURRENCY = _env_int("YTDLP_RESOLVE_CONCURRENCY", 2)
 _RESOLVE_SEMAPHORE = threading.BoundedSemaphore(_RESOLVE_CONCURRENCY)
+# Global cap on yt-dlp extractions, not just race pool workers.  Each
+# extraction may start a Deno JSC solver (~250 MB with the Dockerfile's
+# DENO_V8_FLAGS), so three is the most that fit next to Python in the 1 GB
+# Railway container.  The semaphore wraps _extract_formats itself, so it also
+# covers the serial canary and cookie validation, which bypass the pool.
+_EXTRACT_CONCURRENCY = _env_int("YTDLP_EXTRACT_CONCURRENCY", 3)
+_EXTRACT_SEMAPHORE = threading.BoundedSemaphore(_EXTRACT_CONCURRENCY)
 # Background extraction threads are bounded too: an early-race win leaves the
 # other clients running for a few seconds, so a fixed pool prevents thread
 # accumulation under rapid tapping.
-# Keep this small: each yt-dlp/Deno extraction uses a few hundred MB, and the
-# Railway container has a 1 GB memory limit.  Two client sets plus this pool
-# cap keeps a normal tap below the limit while still racing the gate.
 _EXTRACT_POOL = ThreadPoolExecutor(
-    max_workers=2,
+    max_workers=_EXTRACT_CONCURRENCY,
     thread_name_prefix="resolve",
 )
 # The canary gets its own single slot: a scheduled health check must never
@@ -554,15 +558,16 @@ def _extract_formats(
 ) -> list[dict]:
     """Run yt-dlp for one client set and return its format list."""
     url = f"https://www.youtube.com/watch?v={video_id}"
-    try:
-        with yt_dlp.YoutubeDL(_ydl_opts(list(player_clients), cookiefile)) as ydl:
-            info: dict = ydl.extract_info(url, download=False)
-    except yt_dlp.utils.YoutubeDLError as exc:
-        raise _classify_ytdlp_error(exc, video_id) from exc
-    except Exception as exc:  # network/socket errors and plugin failures
-        raise TransientResolveError(
-            f"yt-dlp failed for video_id={video_id!r} ({type(exc).__name__})"
-        ) from exc
+    with _EXTRACT_SEMAPHORE:
+        try:
+            with yt_dlp.YoutubeDL(_ydl_opts(list(player_clients), cookiefile)) as ydl:
+                info: dict = ydl.extract_info(url, download=False)
+        except yt_dlp.utils.YoutubeDLError as exc:
+            raise _classify_ytdlp_error(exc, video_id) from exc
+        except Exception as exc:  # network/socket errors and plugin failures
+            raise TransientResolveError(
+                f"yt-dlp failed for video_id={video_id!r} ({type(exc).__name__})"
+            ) from exc
     return (info or {}).get("formats") or []
 
 
@@ -679,17 +684,19 @@ def _resolve_parallel(
     video_id: str,
     prefer: str = "opus",
     cookiefile: Optional[str] = None,
-    max_gate_wait: float = _MAX_TAP_GATE_WAIT,
+    max_wait: float = _TAP_RESOLVE_BUDGET,
 ) -> Tuple[str, Dict[str, str]]:
     """
     Race several client sets and return the first ungated format.
 
     YouTube assigns the pre-roll gate per player response, so a different
     client often produces an ungated duplicate while the first one is still
-    gated.  We stop as soon as one set yields a usable format; if every set is
-    gated, we merge their formats and wait for the earliest gate.
+    gated.  We start every set at once and stop as soon as one yields a usable
+    format; if every set is gated, we merge their formats and wait for the
+    earliest gate, but never past *max_wait* from the start of this call.
     """
     started = time.perf_counter()
+    deadline = started + max_wait
     formats: list[dict] = []
     errors: list[ResolverError] = []
     best: Optional[tuple[dict, str]] = None
@@ -703,7 +710,17 @@ def _resolve_parallel(
     pending = set(futures)
     try:
         while pending:
-            done, pending = wait(pending, return_when=FIRST_COMPLETED, timeout=12)
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                errors.append(
+                    TransientResolveError(
+                        f"parallel extraction for {video_id!r} timed out"
+                    )
+                )
+                break
+            done, pending = wait(
+                pending, return_when=FIRST_COMPLETED, timeout=remaining
+            )
             if not done:
                 errors.append(
                     TransientResolveError(
@@ -762,7 +779,7 @@ def _resolve_parallel(
         fmt.get("format_id"),
     )
 
-    _wait_until_available(fmt, max_gate_wait)
+    _wait_until_available(fmt, max(0.0, deadline - time.perf_counter()))
 
     raw_headers = fmt.get("http_headers") or {}
     headers = {k: str(v) for k, v in raw_headers.items() if k in _FORWARDED_HEADERS}
@@ -774,11 +791,11 @@ def _resolve_via_ytdlp(
     prefer: str = "opus",
     cookiefile: Optional[str] = None,
     parallel: bool = True,
-    max_gate_wait: float = _MAX_TAP_GATE_WAIT,
+    max_wait: float = _TAP_RESOLVE_BUDGET,
 ) -> Tuple[str, Dict[str, str]]:
     """Dispatch to the parallel race for normal playback, serial for canary."""
     if parallel and _PARALLEL_RESOLVE:
-        return _resolve_parallel(video_id, prefer, cookiefile, max_gate_wait)
+        return _resolve_parallel(video_id, prefer, cookiefile, max_wait)
     return _resolve_serial(video_id, prefer, cookiefile)
 
 
@@ -825,16 +842,24 @@ def _resolve_with_accounts(
     prefer: str,
     cookiefile: Optional[str] = None,
     parallel: bool = True,
-    max_gate_wait: float = _MAX_TAP_GATE_WAIT,
+    max_wait: float = _TAP_RESOLVE_BUDGET,
 ) -> Tuple[str, Dict[str, str], str]:
     """
     Try the active cookie file, then the reserve one on a bot check.
 
     Only bot checks trigger a switch: a transient network error is not a
-    reason to burn requests on the second account.
+    reason to burn requests on the second account.  The whole account chain
+    shares one *max_wait* budget so a bot check cannot double the tap latency.
     """
+    deadline = time.monotonic() + max_wait
+
+    def remaining() -> float:
+        return max(0.0, deadline - time.monotonic())
+
     if cookiefile is not None:
-        url, headers = _resolve_via_ytdlp(video_id, prefer, cookiefile, parallel=parallel, max_gate_wait=max_gate_wait)
+        url, headers = _resolve_via_ytdlp(
+            video_id, prefer, cookiefile, parallel=parallel, max_wait=remaining()
+        )
         return url, headers, _active_account()
 
     primary = os.getenv("YTDLP_COOKIES_FILE", "").strip()
@@ -858,8 +883,12 @@ def _resolve_with_accounts(
         if not os.path.exists(path):
             logger.warning("Resolver: cookies file for %s is missing", account)
             continue
+        if remaining() <= 0:
+            break
         try:
-            url, headers = _resolve_via_ytdlp(video_id, prefer, path, parallel=parallel, max_gate_wait=max_gate_wait)
+            url, headers = _resolve_via_ytdlp(
+                video_id, prefer, path, parallel=parallel, max_wait=remaining()
+            )
         except BotCheckError as exc:
             last_bot_check = exc
             continue
@@ -876,7 +905,13 @@ def _resolve_with_accounts(
         # yt-dlp result without cookies rather than inventing an error.
         logger.warning("Resolver: no usable cookies file, resolving anonymously")
 
-    url, headers = _resolve_via_ytdlp(video_id, prefer, None, parallel=parallel, max_gate_wait=max_gate_wait)
+    if remaining() <= 0:
+        raise TransientResolveError(
+            f"resolver budget of {max_wait:.1f}s exceeded for video_id={video_id!r}"
+        )
+    url, headers = _resolve_via_ytdlp(
+        video_id, prefer, None, parallel=parallel, max_wait=remaining()
+    )
     return url, headers, active
 
 
@@ -978,7 +1013,7 @@ def get_stream_url(
                 prefer,
                 cookiefile,
                 parallel=not prefetch and not dedicated,
-                max_gate_wait=_MAX_TAP_GATE_WAIT,
+                max_wait=_TAP_RESOLVE_BUDGET,
             )
         except UnavailableError as exc:
             if not force:
