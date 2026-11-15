@@ -1220,8 +1220,8 @@
       } else if (err && err.name === 'AbortError') {
         // A newer track replaced this one
       } else if (err && err.name === 'NotSupportedError') {
-        if (player.format === 'opus') {
-          if (!(await fallbackToAac(seq, 0)) && seq === player.loadSeq) handleTrackFailure(seq);
+        if (fallbackInFlight(seq) || player.format === 'opus') {
+          if (!(await fallbackToAac(seq, 0, true)) && seq === player.loadSeq) handleTrackFailure(seq);
         } else {
           handleTrackFailure(seq);
         }
@@ -1256,35 +1256,51 @@
     }, 1200);
   }
 
-  async function fallbackToAac(seq, at) {
-    player.triedFallback = true;
-    player.format = 'aac';
-    preferredFormat = 'aac';
-    player.prefetchedFor = null;
-    try {
-      const url = await streamLink(player.current, 'aac');
-      if (seq !== player.loadSeq) return true;
-      audio.src = url;
-      if (at) audio.currentTime = at;
-      await audio.play();
-      return true;
-    } catch (err) {
-      if (seq !== player.loadSeq) return true;
-      if (err instanceof ApiError && err.code === 'bot_check') {
-        handleTrackFailure(seq, err.message, err.code);
+  let fallbackAttempt = null;   // { seq, promise } — one AAC retry per load
+  const MEDIA_ERR_SRC_NOT_SUPPORTED = 4;
+  const fallbackInFlight = (seq) => Boolean(fallbackAttempt && fallbackAttempt.seq === seq);
+
+  async function fallbackToAac(seq, at, persistFormat) {
+    if (fallbackInFlight(seq)) return fallbackAttempt.promise;
+    const promise = (async () => {
+      player.triedFallback = true;
+      player.format = 'aac';
+      player.prefetchedFor = null;
+      try {
+        const url = await streamLink(player.current, 'aac');
+        if (seq !== player.loadSeq) return true;
+        audio.src = url;
+        if (at) audio.currentTime = at;
+        await audio.play();
+        // Only a stream that actually plays may change the session format
+        if (persistFormat) preferredFormat = 'aac';
         return true;
+      } catch (err) {
+        if (seq !== player.loadSeq) return true;
+        if (err instanceof ApiError && err.code === 'bot_check') {
+          handleTrackFailure(seq, err.message, err.code);
+          return true;
+        }
+        return false;
       }
-      return false;
-    }
+    })();
+    const clear = () => {
+      if (fallbackAttempt && fallbackAttempt.promise === promise) fallbackAttempt = null;
+    };
+    fallbackAttempt = { seq, promise };
+    promise.then(clear, clear);
+    return promise;
   }
 
   async function onMediaError() {
     if (!player.current || !audio.src || isSilent()) return;
     const seq = player.loadSeq;
-    // Some webviews claim WebM/Opus support but fail: retry once as AAC
-    if (!player.triedFallback && player.format === 'opus') {
+    // Some webviews claim WebM/Opus support but fail: retry once as AAC.
+    // Network/decode failures retry too, but must not pin the session format.
+    const codecError = !audio.error || audio.error.code === MEDIA_ERR_SRC_NOT_SUPPORTED;
+    if (fallbackInFlight(seq) || (!player.triedFallback && player.format === 'opus')) {
       const at = audio.currentTime || 0;
-      if (await fallbackToAac(seq, at)) return;
+      if (await fallbackToAac(seq, at, codecError)) return;
     }
     if (seq === player.loadSeq) handleTrackFailure(seq);
   }
