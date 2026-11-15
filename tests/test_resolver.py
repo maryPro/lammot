@@ -325,7 +325,7 @@ class TestAvailabilityGate:
         with patch("app.resolver.yt_dlp.YoutubeDL", return_value=_make_ydl_mock(formats)), \
              patch("time.time", return_value=now), \
              patch("time.sleep") as sleep:
-            with pytest.raises(resolver.FormatUnavailableError, match="not available yet"):
+            with pytest.raises(resolver.TransientResolveError, match="not available yet"):
                 get_stream_url("dQw4w9WgXcQ")
 
         sleep.assert_not_called()
@@ -354,7 +354,7 @@ class TestAvailabilityGate:
         with patch("app.resolver.yt_dlp.YoutubeDL", return_value=_make_ydl_mock(formats)), \
              patch("time.time", return_value=now), \
              patch("time.sleep") as sleep:
-            with pytest.raises(ValueError, match="not available yet"):
+            with pytest.raises(resolver.TransientResolveError, match="not available yet"):
                 get_stream_url("dQw4w9WgXcQ")
 
         sleep.assert_not_called()
@@ -779,7 +779,7 @@ class TestParallelResolution:
         with patch("app.resolver._extract_formats", side_effect=fake_extract), \
              patch("time.time", return_value=now), \
              patch("time.sleep") as sleep:
-            with pytest.raises(resolver.FormatUnavailableError, match="not available yet"):
+            with pytest.raises(resolver.TransientResolveError, match="not available yet"):
                 resolver._resolve_parallel("dQw4w9WgXcQ", "aac")
 
         sleep.assert_not_called()
@@ -821,3 +821,28 @@ class TestParallelResolution:
             get_stream_url("dQw4w9WgXcQ")
 
         assert race.call_args.args[3] == resolver._MAX_TAP_GATE_WAIT
+
+
+class TestGateCache:
+    def test_gate_timeout_is_not_negative_cached(self):
+        """A gated prefetch must not make the later tap return 404."""
+        now = 1_800_000_000
+        gated = [
+            {"format_id": "140", "url": _FAKE_URL_140, "available_at": now + 5}
+        ]
+        ungated = [{"format_id": "140", "url": _FAKE_URL_140}]
+        calls = []
+
+        def fake_ydl(_opts):
+            calls.append(1)
+            return _make_ydl_mock(gated if len(calls) <= 2 else ungated)
+
+        with patch("app.resolver.yt_dlp.YoutubeDL", side_effect=fake_ydl), \
+             patch("time.time", return_value=now), \
+             patch("time.sleep"):
+            with pytest.raises(resolver.TransientResolveError, match="not available yet"):
+                get_stream_url("dQw4w9WgXcQ", prefer="aac")
+
+            url = get_stream_url("dQw4w9WgXcQ", prefer="aac")
+
+        assert url == _FAKE_URL_140
