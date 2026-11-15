@@ -14,7 +14,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     # caches that Deno and yt-dlp write; /tmp is writable for the app user
     DENO_DIR=/tmp/deno \
     XDG_CACHE_HOME=/tmp/cache \
-    DATABASE_PATH=/data/lammot.db
+    DATABASE_PATH=/data/lammot.db \
+    # Cap each Deno JSC solver: yt-dlp starts one Deno per JavaScript
+    # challenge and up to three may run at once.  Without the cap a single
+    # solver peaks around 340 MB, and three plus Python exceed the Railway
+    # 1 GB limit.  128 MB is too low (V8 aborts with "Last few GCs" and
+    # yt-dlp loses n/sig formats); 160 MB completes challenges reliably.
+    DENO_V8_FLAGS=--max-old-space-size=160,--max-semi-space-size=1
 
 WORKDIR /app
 
