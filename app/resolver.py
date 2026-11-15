@@ -40,6 +40,7 @@ import re
 import threading
 import time
 from collections import Counter
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import ExitStack
 from typing import Dict, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
@@ -98,12 +99,30 @@ _BOT_CHECK_COOLDOWN: float = 60
 # tap-to-play; _select_format tries a shorter-gated itag before we wait.
 _MAX_AVAILABILITY_WAIT: float = 2.0
 
+# Prefetch/canary fail fast at _MAX_AVAILABILITY_WAIT so they do not hold a
+# resolve slot or the per-key lock through a long pre-roll.  A user tap, on the
+# other hand, is better served by waiting a few seconds than by skipping the
+# track, so the parallel tap path allows this longer gate.
+_MAX_TAP_GATE_WAIT: float = 10.0
+
 # Resolver client strategy.  The plain web client is tried first: its muxed
 # 360p MP4 (itag 18) is served without a pre-roll gate, so playback starts
 # immediately.  If that pass yields no usable format, we pay for one pass with
 # the embedded/default clients, which expose the audio-only itags 140/251.
 _FAST_CLIENTS: Tuple[str, ...] = ("web",)
 _DEFAULT_CLIENTS: Tuple[str, ...] = ("web_embedded", "default")
+
+# Interactive taps race these client sets: the pre-roll gate is assigned per
+# player response, so a differently resolved client often returns an ungated
+# format while the first one is still gated.  Each set is cheap and the race
+# stops as soon as one set yields a usable format.
+_FAST_CLIENT_SETS: Tuple[Tuple[str, ...], ...] = (
+    ("web",),
+    ("web_embedded",),
+    ("web_embedded", "default"),
+)
+# Prefetch and taps both race; canary/cookie validation stay serial.
+_PARALLEL_RESOLVE = True
 
 # Muxed 360p MP4 with AAC audio (itag 18).  Used as a gate-free fallback when
 # the audio-only stream is behind a pre-roll.
@@ -137,6 +156,13 @@ def _env_float(name: str, default: float) -> float:
 
 _RESOLVE_CONCURRENCY = _env_int("YTDLP_RESOLVE_CONCURRENCY", 2)
 _RESOLVE_SEMAPHORE = threading.BoundedSemaphore(_RESOLVE_CONCURRENCY)
+# Background extraction threads are bounded too: an early-race win leaves the
+# other clients running for a few seconds, so a fixed pool prevents thread
+# accumulation under rapid tapping.
+_EXTRACT_POOL = ThreadPoolExecutor(
+    max_workers=max(3, _RESOLVE_CONCURRENCY * len(_FAST_CLIENT_SETS)),
+    thread_name_prefix="resolve",
+)
 # The canary gets its own single slot: a scheduled health check must never
 # occupy one of the user resolve slots (a tap and the radio prefetch already
 # use both of them).
@@ -542,7 +568,7 @@ def _usable_now(fmt: Optional[dict]) -> bool:
     return fmt is not None and _gate_wait(fmt) <= _MAX_AVAILABILITY_WAIT
 
 
-def _resolve_via_ytdlp(
+def _resolve_serial(
     video_id: str,
     prefer: str = "opus",
     cookiefile: Optional[str] = None,
@@ -632,7 +658,128 @@ def _resolve_via_ytdlp(
     return fmt["url"], headers or dict(_DEFAULT_HEADERS)
 
 
-def _wait_until_available(fmt: dict) -> None:
+def _pick_resolver_error(errors: list[ResolverError]) -> ResolverError:
+    """Return the most actionable error from a parallel race."""
+    for cls in (
+        BotCheckError,
+        VideoUnavailableError,
+        TransientResolveError,
+        FormatUnavailableError,
+    ):
+        for exc in errors:
+            if isinstance(exc, cls):
+                return exc
+    return errors[0]
+
+
+def _resolve_parallel(
+    video_id: str,
+    prefer: str = "opus",
+    cookiefile: Optional[str] = None,
+    max_gate_wait: float = _MAX_TAP_GATE_WAIT,
+) -> Tuple[str, Dict[str, str]]:
+    """
+    Race several client sets and return the first ungated format.
+
+    YouTube assigns the pre-roll gate per player response, so a different
+    client often produces an ungated duplicate while the first one is still
+    gated.  We stop as soon as one set yields a usable format; if every set is
+    gated, we merge their formats and wait for the earliest gate.
+    """
+    started = time.perf_counter()
+    formats: list[dict] = []
+    errors: list[ResolverError] = []
+    best: Optional[tuple[dict, str]] = None
+    extract_calls = 0
+
+    pool = _EXTRACT_POOL
+    futures = {
+        pool.submit(_extract_formats, video_id, clients, cookiefile): clients
+        for clients in _FAST_CLIENT_SETS
+    }
+    pending = set(futures)
+    try:
+        while pending:
+            done, pending = wait(pending, return_when=FIRST_COMPLETED, timeout=12)
+            if not done:
+                errors.append(
+                    TransientResolveError(
+                        f"parallel extraction for {video_id!r} timed out"
+                    )
+                )
+                break
+            for future in done:
+                extract_calls += 1
+                clients = futures[future]
+                try:
+                    extra = future.result()
+                except ResolverError as exc:
+                    errors.append(exc)
+                    continue
+                except Exception as exc:  # unexpected plugin/network failure
+                    errors.append(
+                        TransientResolveError(
+                            f"parallel extraction for {video_id!r} failed "
+                            f"({type(exc).__name__})"
+                        )
+                    )
+                    continue
+                formats.extend(extra)
+                fmt = _select_format(extra, prefer)
+                if _usable_now(fmt):
+                    best = (fmt, ",".join(clients))
+                    break
+            if best is not None:
+                break
+    finally:
+        for future in futures:
+            future.cancel()
+
+    if best is None:
+        fmt = _select_format(formats, prefer)
+        if fmt is None:
+            if errors:
+                raise _pick_resolver_error(errors)
+            raise FormatUnavailableError(
+                f"No supported audio format (itag 251, 140 or 18) found "
+                f"for video_id={video_id!r}"
+            )
+        best = (fmt, "merged")
+
+    fmt, winner = best
+    logger.info(
+        "Resolver: %s outcome=%s clients=parallel(%s) passes=%d "
+        "extract_ms=%.0f gate_ms=%.0f itag=%s",
+        video_id,
+        "ready" if _usable_now(fmt) else "gated",
+        winner,
+        extract_calls,
+        (time.perf_counter() - started) * 1000,
+        _gate_wait(fmt) * 1000,
+        fmt.get("format_id"),
+    )
+
+    _wait_until_available(fmt, max_gate_wait)
+
+    raw_headers = fmt.get("http_headers") or {}
+    headers = {k: str(v) for k, v in raw_headers.items() if k in _FORWARDED_HEADERS}
+    return fmt["url"], headers or dict(_DEFAULT_HEADERS)
+
+
+def _resolve_via_ytdlp(
+    video_id: str,
+    prefer: str = "opus",
+    cookiefile: Optional[str] = None,
+    parallel: bool = True,
+    max_gate_wait: float = _MAX_TAP_GATE_WAIT,
+) -> Tuple[str, Dict[str, str]]:
+    """Dispatch to the parallel race for normal playback, serial for canary."""
+    if parallel and _PARALLEL_RESOLVE:
+        return _resolve_parallel(video_id, prefer, cookiefile, max_gate_wait)
+    return _resolve_serial(video_id, prefer, cookiefile)
+
+
+def _wait_until_available(fmt: dict, max_wait: float = _MAX_AVAILABILITY_WAIT) -> None:
     """
     Wait until YouTube reports the format as available.
 
@@ -647,7 +794,7 @@ def _wait_until_available(fmt: dict) -> None:
     wait = _gate_wait(fmt)
     if wait <= 0:
         return
-    if wait > _MAX_AVAILABILITY_WAIT:
+    if wait > max_wait:
         raise FormatUnavailableError(
             f"Format is not available yet (available_at in {int(wait)}s)"
         )
@@ -671,6 +818,8 @@ def _resolve_with_accounts(
     video_id: str,
     prefer: str,
     cookiefile: Optional[str] = None,
+    parallel: bool = True,
+    max_gate_wait: float = _MAX_TAP_GATE_WAIT,
 ) -> Tuple[str, Dict[str, str], str]:
     """
     Try the active cookie file, then the reserve one on a bot check.
@@ -679,7 +828,7 @@ def _resolve_with_accounts(
     reason to burn requests on the second account.
     """
     if cookiefile is not None:
-        url, headers = _resolve_via_ytdlp(video_id, prefer, cookiefile)
+        url, headers = _resolve_via_ytdlp(video_id, prefer, cookiefile, parallel=parallel, max_gate_wait=max_gate_wait)
         return url, headers, _active_account()
 
     primary = os.getenv("YTDLP_COOKIES_FILE", "").strip()
@@ -704,7 +853,7 @@ def _resolve_with_accounts(
             logger.warning("Resolver: cookies file for %s is missing", account)
             continue
         try:
-            url, headers = _resolve_via_ytdlp(video_id, prefer, path)
+            url, headers = _resolve_via_ytdlp(video_id, prefer, path, parallel=parallel, max_gate_wait=max_gate_wait)
         except BotCheckError as exc:
             last_bot_check = exc
             continue
@@ -721,7 +870,7 @@ def _resolve_with_accounts(
         # yt-dlp result without cookies rather than inventing an error.
         logger.warning("Resolver: no usable cookies file, resolving anonymously")
 
-    url, headers = _resolve_via_ytdlp(video_id, prefer, None)
+    url, headers = _resolve_via_ytdlp(video_id, prefer, None, parallel=parallel, max_gate_wait=max_gate_wait)
     return url, headers, active
 
 
@@ -819,7 +968,13 @@ def get_stream_url(
         _pace_resolve()
         try:
             stream_url, headers, _account = _resolve_with_accounts(
-                video_id, prefer, cookiefile
+                video_id,
+                prefer,
+                cookiefile,
+                parallel=not dedicated,
+                max_gate_wait=(
+                    _MAX_AVAILABILITY_WAIT if prefetch else _MAX_TAP_GATE_WAIT
+                ),
             )
         except UnavailableError as exc:
             if not force:

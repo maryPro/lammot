@@ -99,6 +99,12 @@ def clear_cache():
     cache_clear()
 
 
+@pytest.fixture(autouse=True)
+def serial_resolver(monkeypatch):
+    """Existing tests exercise the deterministic serial path."""
+    monkeypatch.setattr(resolver, "_PARALLEL_RESOLVE", False)
+
+
 # ---------------------------------------------------------------------------
 # Tests: format selection
 # ---------------------------------------------------------------------------
@@ -706,3 +712,110 @@ class TestPrefetchPriority:
         assert url == _FAKE_URL_251
         guard.__enter__.assert_not_called()
         user_slot.__enter__.assert_called_once()
+
+
+class TestParallelResolution:
+    """Interactive taps race several clients and stop at the first usable one."""
+
+    @staticmethod
+    def _by_clients(web, embedded, default):
+        return {
+            ("web",): web,
+            ("web_embedded",): embedded,
+            ("web_embedded", "default"): default,
+        }
+
+    def test_returns_an_ungated_client_when_web_is_gated(self):
+        now = 1_800_000_000
+        gated = [{"format_id": "18", "url": _FAKE_URL_18, "available_at": now + 6}]
+        ungated = [{"format_id": "140", "url": _FAKE_URL_140}]
+        by_clients = self._by_clients(gated, ungated, ungated)
+
+        def fake_extract(_video_id, clients, _cookiefile=None):
+            return by_clients[clients]
+
+        with patch("app.resolver._extract_formats", side_effect=fake_extract), \
+             patch("time.time", return_value=now):
+            url, _headers = resolver._resolve_parallel("dQw4w9WgXcQ", "aac")
+
+        assert url == _FAKE_URL_140
+
+    def test_returns_the_fast_muxed_stream_when_it_is_ready(self):
+        def fake_extract(_video_id, _clients, _cookiefile=None):
+            return _FORMATS_18_ONLY
+
+        with patch("app.resolver._extract_formats", side_effect=fake_extract):
+            url, _headers = resolver._resolve_parallel("dQw4w9WgXcQ", "aac")
+
+        assert url == _FAKE_URL_18
+
+    def test_all_gated_merges_and_waits_for_the_earliest_gate(self):
+        now = 1_800_000_000
+        web = [{"format_id": "18", "url": _FAKE_URL_18, "available_at": now + 8}]
+        embedded = [{"format_id": "140", "url": _FAKE_URL_140, "available_at": now + 4}]
+        default = [{"format_id": "140", "url": _FAKE_URL_140, "available_at": now + 6}]
+        by_clients = self._by_clients(web, embedded, default)
+
+        def fake_extract(_video_id, clients, _cookiefile=None):
+            return by_clients[clients]
+
+        with patch("app.resolver._extract_formats", side_effect=fake_extract), \
+             patch("time.time", return_value=now), \
+             patch("time.sleep") as sleep:
+            url, _headers = resolver._resolve_parallel("dQw4w9WgXcQ", "aac")
+
+        assert url == _FAKE_URL_140
+        sleep.assert_called_once()
+        assert sleep.call_args.args[0] == pytest.approx(4.0)
+
+    def test_all_clients_gated_beyond_the_tap_cap_fail(self):
+        now = 1_800_000_000
+        gated = [{"format_id": "18", "url": _FAKE_URL_18, "available_at": now + 60}]
+        by_clients = self._by_clients(gated, gated, gated)
+
+        def fake_extract(_video_id, clients, _cookiefile=None):
+            return by_clients[clients]
+
+        with patch("app.resolver._extract_formats", side_effect=fake_extract), \
+             patch("time.time", return_value=now), \
+             patch("time.sleep") as sleep:
+            with pytest.raises(resolver.FormatUnavailableError, match="not available yet"):
+                resolver._resolve_parallel("dQw4w9WgXcQ", "aac")
+
+        sleep.assert_not_called()
+
+    def test_race_raises_the_most_actionable_error(self):
+        def fake_extract(_video_id, clients, _cookiefile=None):
+            if clients == ("web",):
+                raise resolver.FormatUnavailableError("no format")
+            if clients == ("web_embedded",):
+                raise resolver.TransientResolveError("network")
+            raise resolver.BotCheckError("bot check")
+
+        with patch("app.resolver._extract_formats", side_effect=fake_extract):
+            with pytest.raises(resolver.BotCheckError):
+                resolver._resolve_parallel("dQw4w9WgXcQ", "aac")
+
+    def test_dispatcher_uses_the_race_for_normal_playback(self, monkeypatch):
+        monkeypatch.setattr(resolver, "_PARALLEL_RESOLVE", True)
+        with patch("app.resolver._resolve_parallel", return_value=("race", {})) as race, \
+             patch("app.resolver._resolve_serial", return_value=("serial", {})) as serial:
+            assert resolver._resolve_via_ytdlp("x", "aac", None, parallel=True)[0] == "race"
+            assert resolver._resolve_via_ytdlp("x", "aac", None, parallel=False)[0] == "serial"
+
+        race.assert_called_once()
+        serial.assert_called_once()
+
+    def test_prefetch_uses_the_short_gate_cap(self, monkeypatch):
+        monkeypatch.setattr(resolver, "_PARALLEL_RESOLVE", True)
+        with patch("app.resolver._resolve_parallel", return_value=(_FAKE_URL_18, {})) as race:
+            get_stream_url("dQw4w9WgXcQ", prefetch=True)
+
+        assert race.call_args.args[3] == resolver._MAX_AVAILABILITY_WAIT
+
+    def test_tap_uses_the_long_gate_cap(self, monkeypatch):
+        monkeypatch.setattr(resolver, "_PARALLEL_RESOLVE", True)
+        with patch("app.resolver._resolve_parallel", return_value=(_FAKE_URL_18, {})) as race:
+            get_stream_url("dQw4w9WgXcQ")
+
+        assert race.call_args.args[3] == resolver._MAX_TAP_GATE_WAIT
