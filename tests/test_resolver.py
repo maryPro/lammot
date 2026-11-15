@@ -880,15 +880,18 @@ class TestParallelResolution:
         race.assert_not_called()
         serial.assert_called_once()
 
-    def test_tap_uses_the_three_second_budget(self, monkeypatch):
+    def test_tap_gate_wait_is_three_seconds(self, monkeypatch):
         monkeypatch.setattr(resolver, "_PARALLEL_RESOLVE", True)
         with patch("app.resolver._resolve_parallel", return_value=(_FAKE_URL_18, {})) as race:
             get_stream_url("dQw4w9WgXcQ")
 
-        assert resolver._TAP_RESOLVE_BUDGET == 3.0
-        assert race.call_args.args[3] == pytest.approx(
-            resolver._TAP_RESOLVE_BUDGET, abs=0.01
-        )
+        assert resolver._MAX_TAP_GATE_WAIT == 3.0
+        assert race.call_args.args[3] == resolver._MAX_TAP_GATE_WAIT
+
+    def test_extraction_timeout_is_separate_from_the_gate_wait(self):
+        """A 3 s total deadline made every cold resolve return 502 at 3.0 s."""
+        assert resolver._MAX_TAP_EXTRACT_WAIT >= 10.0
+        assert resolver._MAX_TAP_EXTRACT_WAIT > resolver._MAX_TAP_GATE_WAIT
 
 
 class TestGateCache:
