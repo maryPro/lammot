@@ -118,6 +118,7 @@ _DEFAULT_CLIENTS: Tuple[str, ...] = ("web_embedded", "default")
 # stops as soon as one set yields a usable format.
 _FAST_CLIENT_SETS: Tuple[Tuple[str, ...], ...] = (
     ("web",),
+    ("web_embedded",),
     ("web_embedded", "default"),
 )
 # Prefetch and taps both race; canary/cookie validation stay serial.

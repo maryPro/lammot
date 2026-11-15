@@ -718,9 +718,10 @@ class TestParallelResolution:
     """Interactive taps race several clients and stop at the first usable one."""
 
     @staticmethod
-    def _by_clients(web, default):
+    def _by_clients(web, embedded, default):
         return {
             ("web",): web,
+            ("web_embedded",): embedded,
             ("web_embedded", "default"): default,
         }
 
@@ -728,7 +729,7 @@ class TestParallelResolution:
         now = 1_800_000_000
         gated = [{"format_id": "18", "url": _FAKE_URL_18, "available_at": now + 6}]
         ungated = [{"format_id": "140", "url": _FAKE_URL_140}]
-        by_clients = self._by_clients(gated, ungated)
+        by_clients = self._by_clients(gated, ungated, ungated)
 
         def fake_extract(_video_id, clients, _cookiefile=None):
             return by_clients[clients]
@@ -751,8 +752,9 @@ class TestParallelResolution:
     def test_all_gated_merges_and_waits_for_the_earliest_gate(self):
         now = 1_800_000_000
         web = [{"format_id": "18", "url": _FAKE_URL_18, "available_at": now + 8}]
-        default = [{"format_id": "140", "url": _FAKE_URL_140, "available_at": now + 4}]
-        by_clients = self._by_clients(web, default)
+        embedded = [{"format_id": "140", "url": _FAKE_URL_140, "available_at": now + 4}]
+        default = [{"format_id": "140", "url": _FAKE_URL_140, "available_at": now + 6}]
+        by_clients = self._by_clients(web, embedded, default)
 
         def fake_extract(_video_id, clients, _cookiefile=None):
             return by_clients[clients]
@@ -769,7 +771,7 @@ class TestParallelResolution:
     def test_all_clients_gated_beyond_the_tap_cap_fail(self):
         now = 1_800_000_000
         gated = [{"format_id": "18", "url": _FAKE_URL_18, "available_at": now + 60}]
-        by_clients = self._by_clients(gated, gated)
+        by_clients = self._by_clients(gated, gated, gated)
 
         def fake_extract(_video_id, clients, _cookiefile=None):
             return by_clients[clients]
@@ -786,6 +788,8 @@ class TestParallelResolution:
         def fake_extract(_video_id, clients, _cookiefile=None):
             if clients == ("web",):
                 raise resolver.FormatUnavailableError("no format")
+            if clients == ("web_embedded",):
+                raise resolver.TransientResolveError("network")
             raise resolver.BotCheckError("bot check")
 
         with patch("app.resolver._extract_formats", side_effect=fake_extract):
