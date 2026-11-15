@@ -1055,9 +1055,20 @@
   const audio = $('audio');
   const AUDIO_FORMAT = (() => {
     try {
-      return audio.canPlayType('audio/webm; codecs="opus"') ? 'opus' : 'aac';
-    } catch (_) { return 'aac'; }
+      if (window.LammotAudioFormat) {
+        return window.LammotAudioFormat.chooseFormat({
+          canPlayType: (type) => audio.canPlayType(type),
+          userAgent: navigator.userAgent,
+          platform: navigator.platform,
+          maxTouchPoints: navigator.maxTouchPoints,
+        });
+      }
+    } catch (_) { /* the safest format wins */ }
+    return 'aac';
   })();
+  // Survives per-track resets: once a format is known to work here, every
+  // later track and prefetch asks for it instead of paying a second resolve.
+  let preferredFormat = AUDIO_FORMAT;
 
   // A play() call made directly inside a tap "unlocks" the <audio> element;
   // after that, play() also works after awaiting the network (next songs,
@@ -1087,7 +1098,7 @@
     inflight: new Map(), // `${video_id}:${format}` → Promise (dedupe prefetch/click)
     refilling: false,
     recorded: false,
-    format: AUDIO_FORMAT,
+    format: preferredFormat,
     triedFallback: false,
     failedInRow: 0,
     prefetchedFor: null,
@@ -1129,7 +1140,7 @@
     while (prefetchActive < PREFETCH_LIMIT && prefetchQueue.length) {
       const track = prefetchQueue.shift();
       prefetchActive += 1;
-      streamLink(track, AUDIO_FORMAT)
+      streamLink(track, preferredFormat)
         .catch((err) => {
           if (err instanceof ApiError && err.code === 'bot_check') {
             player.botCheck = true;
@@ -1143,9 +1154,9 @@
     }
   }
 
-  function prefetchTrack(track, format = AUDIO_FORMAT) {
+  function prefetchTrack(track, format = preferredFormat) {
     if (!track || !track.video_id || player.botCheck) return;
-    if (format !== AUDIO_FORMAT) return streamLink(track, format).catch(() => {});
+    if (format !== preferredFormat) return streamLink(track, format).catch(() => {});
     const key = `${track.video_id}:${format}`;
     const cached = player.links.get(key);
     if (cached && cached.expires > Date.now()) return;
@@ -1186,7 +1197,7 @@
     }
     player.current = track;
     player.recorded = false;
-    player.format = AUDIO_FORMAT;
+    player.format = preferredFormat;
     player.triedFallback = false;
     player.prefetchedFor = null;
     renderPlayer();
@@ -1208,6 +1219,12 @@
         renderPlayState();
       } else if (err && err.name === 'AbortError') {
         // A newer track replaced this one
+      } else if (err && err.name === 'NotSupportedError') {
+        if (player.format === 'opus') {
+          if (!(await fallbackToAac(seq, 0)) && seq === player.loadSeq) handleTrackFailure(seq);
+        } else {
+          handleTrackFailure(seq);
+        }
       } else if (err instanceof ApiError) {
         handleTrackFailure(seq, err.message, err.code);
       }
@@ -1239,28 +1256,35 @@
     }, 1200);
   }
 
+  async function fallbackToAac(seq, at) {
+    player.triedFallback = true;
+    player.format = 'aac';
+    preferredFormat = 'aac';
+    player.prefetchedFor = null;
+    try {
+      const url = await streamLink(player.current, 'aac');
+      if (seq !== player.loadSeq) return true;
+      audio.src = url;
+      if (at) audio.currentTime = at;
+      await audio.play();
+      return true;
+    } catch (err) {
+      if (seq !== player.loadSeq) return true;
+      if (err instanceof ApiError && err.code === 'bot_check') {
+        handleTrackFailure(seq, err.message, err.code);
+        return true;
+      }
+      return false;
+    }
+  }
+
   async function onMediaError() {
     if (!player.current || !audio.src || isSilent()) return;
     const seq = player.loadSeq;
     // Some webviews claim WebM/Opus support but fail: retry once as AAC
     if (!player.triedFallback && player.format === 'opus') {
-      player.triedFallback = true;
-      player.format = 'aac';
-      try {
-        const at = audio.currentTime || 0;
-        const url = await streamLink(player.current, 'aac');
-        if (seq !== player.loadSeq) return;
-        audio.src = url;
-        if (at) audio.currentTime = at;
-        await audio.play();
-        return;
-      } catch (err) {
-        if (err instanceof ApiError && err.code === 'bot_check') {
-          handleTrackFailure(seq, err.message, err.code);
-          return;
-        }
-        /* fall through to skip */
-      }
+      const at = audio.currentTime || 0;
+      if (await fallbackToAac(seq, at)) return;
     }
     if (seq === player.loadSeq) handleTrackFailure(seq);
   }
@@ -1610,7 +1634,7 @@
       if (upcoming && !player.botCheck && duration > 0 && duration - audio.currentTime < PREFETCH_SECONDS
           && player.prefetchedFor !== upcoming.video_id) {
         player.prefetchedFor = upcoming.video_id;
-        streamLink(upcoming, AUDIO_FORMAT).catch(() => {});
+        streamLink(upcoming, preferredFormat).catch(() => {});
       }
     });
     audio.addEventListener('ended', () => { if (!isSilent()) next({ auto: true }); });
