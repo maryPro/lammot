@@ -13,6 +13,8 @@ still never stores audio — it only passes bytes through.
 Format priority:
     prefer="opus" (default): itag 251 WebM/Opus ~160 kbps, then itag 140
     prefer="aac":            itag 140 M4A/AAC  ~128 kbps, then itag 251
+    Both fall back to itag 18 (muxed 360p MP4/AAC) when the audio-only
+    streams are behind a pre-roll gate.
     (Telegram on older iOS cannot play WebM/Opus, so the client asks for aac.)
 
 Caching (app/cache.py):
@@ -73,7 +75,7 @@ class VideoUnavailableError(UnavailableError):
 
 
 class FormatUnavailableError(UnavailableError):
-    """The video has no playable itag 251/140 right now."""
+    """The video has no playable itag 251/140/18 right now."""
 
 
 # ---------------------------------------------------------------------------
@@ -96,12 +98,16 @@ _BOT_CHECK_COOLDOWN: float = 60
 # tap-to-play; _select_format tries a shorter-gated itag before we wait.
 _MAX_AVAILABILITY_WAIT: float = 2.0
 
-# Resolver client strategy.  The embedded client is tried alone first: it has
-# no pre-roll gate for most tracks and is cheaper than merging every client.
-# Only when it yields no usable format do we pay for one pass with the default
-# client set (some videos disable embedding or expose formats only there).
-_EMBEDDED_CLIENTS: Tuple[str, ...] = ("web_embedded",)
+# Resolver client strategy.  The plain web client is tried first: its muxed
+# 360p MP4 (itag 18) is served without a pre-roll gate, so playback starts
+# immediately.  If that pass yields no usable format, we pay for one pass with
+# the embedded/default clients, which expose the audio-only itags 140/251.
+_FAST_CLIENTS: Tuple[str, ...] = ("web",)
 _DEFAULT_CLIENTS: Tuple[str, ...] = ("web_embedded", "default")
+
+# Muxed 360p MP4 with AAC audio (itag 18).  Used as a gate-free fallback when
+# the audio-only stream is behind a pre-roll.
+_MUXED_ITAG = 18
 
 # When the preferred Opus stream is gated but AAC is not, prefer the immediate
 # AAC stream if it saves at least this many seconds.  AAC is playable
@@ -313,7 +319,7 @@ def _configured_clients() -> Tuple[str, ...]:
         clients = tuple(c.strip() for c in raw.split(",") if c.strip())
         if clients:
             return clients
-    return _EMBEDDED_CLIENTS
+    return _FAST_CLIENTS
 
 
 def _fallback_clients() -> Tuple[str, ...]:
@@ -335,7 +341,7 @@ def _ydl_opts(
         "quiet": True,            # suppress progress output
         "no_warnings": True,      # suppress warning lines
         "skip_download": True,    # never write any file to disk
-        # No format hint: we pick itag 251/140 ourselves in _pick_format().
+        # No format hint: we pick itag 251/140/18 ourselves in _pick_format().
         # Asking yt-dlp for "bestaudio" makes it fail on clients whose formats
         # are SABR-only or missing a URL, even though other clients have them.
         "extractor_args": {
@@ -407,7 +413,7 @@ def _raise_negative(kind: str, video_id: str) -> None:
     if kind == "video":
         raise VideoUnavailableError(f"Video unavailable: video_id={video_id!r}")
     raise FormatUnavailableError(
-        f"No supported audio format (itag 251 or 140) found "
+        f"No supported audio format (itag 251, 140 or 18) found "
         f"for video_id={video_id!r}"
     )
 
@@ -460,31 +466,39 @@ def _gate_wait(fmt: Optional[dict]) -> float:
 
 def _select_format(formats: list[dict], prefer: str) -> Optional[dict]:
     """
-    Pick a format, trading Opus for AAC only when it avoids a real wait.
+    Pick a format, preferring audio-only and falling back to gate-free muxed.
 
-    AAC is universally playable, so a short gate on Opus is worth hopping over
-    a multi-second pre-roll gate on Opus.  The reverse switch is never done:
-    clients that ask for AAC may not decode Opus.
+    The audio-only streams (251/140) are the best choice when they are
+    playable.  When they are behind a pre-roll gate, itag 18 (muxed 360p MP4)
+    is often served immediately; a small bandwidth trade buys an instant
+    start.  Opus is traded for AAC only when that avoids a real wait.
     """
     fmt = _pick_format(formats, _ITAG_ORDER[prefer])
-    if fmt is None or prefer != "opus":
-        return fmt
 
-    preferred_wait = _gate_wait(fmt)
-    if preferred_wait < _GATE_SWITCH_MIN_SAVING:
-        return fmt
+    if fmt is not None and prefer == "opus":
+        preferred_wait = _gate_wait(fmt)
+        if preferred_wait >= _GATE_SWITCH_MIN_SAVING:
+            alt = _pick_format(formats, (_FALLBACK_ITAG,))
+            if alt is not None and preferred_wait - _gate_wait(alt) >= _GATE_SWITCH_MIN_SAVING:
+                logger.info(
+                    "Resolver: using itag %s instead of Opus to avoid a %.1fs gate",
+                    alt.get("format_id"),
+                    preferred_wait,
+                )
+                fmt = alt
 
-    alt = _pick_format(formats, (_FALLBACK_ITAG,))
-    if alt is None:
-        return fmt
+    muxed = _pick_format(formats, (_MUXED_ITAG,))
+    if muxed is not None:
+        fmt_wait = _gate_wait(fmt)
+        muxed_wait = _gate_wait(muxed)
+        if fmt_wait - muxed_wait >= _GATE_SWITCH_MIN_SAVING:
+            logger.info(
+                "Resolver: using muxed itag %s to avoid a %.1fs gate",
+                muxed.get("format_id"),
+                fmt_wait,
+            )
+            return muxed
 
-    if preferred_wait - _gate_wait(alt) >= _GATE_SWITCH_MIN_SAVING:
-        logger.info(
-            "Resolver: using itag %s instead of Opus to avoid a %.1fs gate",
-            alt.get("format_id"),
-            preferred_wait,
-        )
-        return alt
     return fmt
 
 
@@ -536,10 +550,11 @@ def _resolve_via_ytdlp(
     """
     Call yt-dlp to extract audio format information for *video_id*.
 
-    The embedded client is tried alone first because it usually carries no
-    pre-roll gate and avoids the cost of merging formats from every client.
-    Only when that pass has no format usable within _MAX_AVAILABILITY_WAIT do
-    we run one fallback pass with _DEFAULT_CLIENTS.
+    The web client is tried alone first: it exposes a muxed 360p MP4
+    (itag 18) that is usually free of pre-roll gates, so playback can start
+    immediately.  Only when that pass has no format usable within
+    _MAX_AVAILABILITY_WAIT do we run one fallback pass with _DEFAULT_CLIENTS
+    to obtain the audio-only itags 140/251.
 
     Returns (CDN URL, HTTP headers to send with it).
 
@@ -594,7 +609,7 @@ def _resolve_via_ytdlp(
         if first_error is not None:
             raise first_error
         raise FormatUnavailableError(
-            f"No supported audio format (itag 251 or 140) found "
+            f"No supported audio format (itag 251, 140 or 18) found "
             f"for video_id={video_id!r}"
         )
 

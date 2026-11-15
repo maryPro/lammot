@@ -49,6 +49,10 @@ _FAKE_URL_251_LATE = (
     "https://rr4---sn-late.googlevideo.com/videoplayback"
     "?expire=9999999999&itag=251&mime=audio/webm"
 )
+_FAKE_URL_18 = (
+    "https://rr5---sn-muxed.googlevideo.com/videoplayback"
+    "?expire=9999999999&itag=18&mime=video/mp4"
+)
 
 # A minimal format list that yt-dlp would return
 _FORMATS_BOTH = [
@@ -58,8 +62,11 @@ _FORMATS_BOTH = [
 _FORMATS_140_ONLY = [
     {"format_id": "140", "url": _FAKE_URL_140, "acodec": "mp4a.40.2"},
 ]
+_FORMATS_18_ONLY = [
+    {"format_id": "18", "url": _FAKE_URL_18, "acodec": "mp4a.40.2", "vcodec": "avc1.42001E"},
+]
 _FORMATS_NONE = [
-    {"format_id": "18", "url": "https://rr1---sn-abc.googlevideo.com/vp?itag=18", "acodec": "mp4a.40.2"},
+    {"format_id": "137", "url": "https://rr1---sn-abc.googlevideo.com/vp?itag=137", "acodec": "none"},
 ]
 
 
@@ -113,8 +120,57 @@ class TestFormatSelection:
 
         assert url == _FAKE_URL_140
 
+    def test_muxed_itag_18_when_only_muxed_is_available(self):
+        """The web client exposes only the gate-free muxed MP4."""
+        with patch("app.resolver.yt_dlp.YoutubeDL", return_value=_make_ydl_mock(_FORMATS_18_ONLY)):
+            url = get_stream_url("dQw4w9WgXcQ", prefer="aac")
+
+        assert url == _FAKE_URL_18
+
+    def test_muxed_itag_18_beats_a_large_audio_only_gate(self):
+        """Trade a little bandwidth for an instant start when AAC is gated."""
+        now = 1_800_000_000
+        formats = [
+            {"format_id": "140", "url": _FAKE_URL_140, "available_at": now + 5},
+            {"format_id": "18", "url": _FAKE_URL_18},
+        ]
+
+        with patch("app.resolver.yt_dlp.YoutubeDL", return_value=_make_ydl_mock(formats)), \
+             patch("time.time", return_value=now), \
+             patch("time.sleep") as sleep:
+            url = get_stream_url("dQw4w9WgXcQ", prefer="aac")
+
+        assert url == _FAKE_URL_18
+        sleep.assert_not_called()
+
+    def test_muxed_itag_18_beats_a_large_opus_gate(self):
+        now = 1_800_000_000
+        formats = [
+            {"format_id": "251", "url": _FAKE_URL_251_LATE, "available_at": now + 5},
+            {"format_id": "18", "url": _FAKE_URL_18},
+        ]
+
+        with patch("app.resolver.yt_dlp.YoutubeDL", return_value=_make_ydl_mock(formats)), \
+             patch("time.time", return_value=now), \
+             patch("time.sleep") as sleep:
+            url = get_stream_url("dQw4w9WgXcQ")
+
+        assert url == _FAKE_URL_18
+        sleep.assert_not_called()
+
+    def test_audio_only_wins_over_muxed_when_both_are_ready(self):
+        formats = [
+            {"format_id": "140", "url": _FAKE_URL_140},
+            {"format_id": "18", "url": _FAKE_URL_18},
+        ]
+
+        with patch("app.resolver.yt_dlp.YoutubeDL", return_value=_make_ydl_mock(formats)):
+            url = get_stream_url("dQw4w9WgXcQ", prefer="aac")
+
+        assert url == _FAKE_URL_140
+
     def test_raises_value_error_when_no_supported_format(self):
-        """If neither itag 251 nor 140 is present, ValueError is raised."""
+        """If none of itag 251/140/18 is present, ValueError is raised."""
         with patch("app.resolver.yt_dlp.YoutubeDL", return_value=_make_ydl_mock(_FORMATS_NONE)):
             with pytest.raises(ValueError, match="No supported audio format"):
                 get_stream_url("dQw4w9WgXcQ")
@@ -361,8 +417,8 @@ class TestAvailabilityGate:
         assert url == _FAKE_URL_140
         sleep.assert_not_called()
 
-    def test_falls_back_to_default_when_embedded_is_gated(self):
-        """Embedded is tried alone first; default is added only when it fails."""
+    def test_falls_back_to_default_when_web_is_gated(self):
+        """The web client is tried first; default is added only when it fails."""
         now = 1_800_000_000
         gated = [{"format_id": "251", "url": _FAKE_URL_251_LATE, "available_at": now + 6}]
         ungated = [{"format_id": "251", "url": _FAKE_URL_251_EARLY}]
@@ -378,11 +434,11 @@ class TestAvailabilityGate:
             url = get_stream_url("dQw4w9WgXcQ")
 
         assert url == _FAKE_URL_251_EARLY
-        assert calls == [["web_embedded"], ["web_embedded", "default"]]
+        assert calls == [["web"], ["web_embedded", "default"]]
         sleep.assert_not_called()
 
-    def test_no_fallback_pass_when_embedded_is_ready(self):
-        """The production regression: a usable embedded result must not be re-resolved."""
+    def test_no_fallback_pass_when_web_is_ready(self):
+        """A usable web result must not be re-resolved."""
         calls = []
 
         def fake_ydl(opts):
@@ -393,7 +449,7 @@ class TestAvailabilityGate:
             url = get_stream_url("dQw4w9WgXcQ")
 
         assert url == _FAKE_URL_251
-        assert calls == [["web_embedded"]]
+        assert calls == [["web"]]
 
     def test_concurrent_calls_resolve_once(self):
         """Single-flight: concurrent prefetch + click share one extraction."""
@@ -420,21 +476,21 @@ class TestAvailabilityGate:
 
 
 class TestClientOptions:
-    def test_default_pass_uses_only_the_embedded_client(self):
-        """Embedded has no pre-roll gate, so it is the cheap first attempt."""
+    def test_default_pass_uses_the_web_client(self):
+        """The web client's muxed MP4 is usually free of a pre-roll gate."""
         clients = _ydl_opts()["extractor_args"]["youtube"]["player_client"]
-        assert clients == ["web_embedded"]
+        assert clients == ["web"]
 
     def test_fallback_pass_adds_the_default_client(self):
-        """Videos where embedding is disabled still get the default clients."""
+        """Videos where the web client is gated get the embedded/default clients."""
         assert resolver._fallback_clients() == ("web_embedded", "default")
 
-    def test_embedded_stage_uses_only_the_embedded_client(self):
-        clients = _ydl_opts(["web_embedded"])["extractor_args"]["youtube"]["player_client"]
-        assert clients == ["web_embedded"]
+    def test_fast_stage_uses_only_the_web_client(self):
+        clients = _ydl_opts(["web"])["extractor_args"]["youtube"]["player_client"]
+        assert clients == ["web"]
 
     def test_no_format_hint_is_passed_to_ytdlp(self):
-        """We select itag 251/140 ourselves; a format hint breaks SABR clients."""
+        """We select itag 251/140/18 ourselves; a format hint breaks SABR clients."""
         assert "format" not in _ydl_opts()
 
 
