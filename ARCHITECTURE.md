@@ -64,8 +64,10 @@ Converts a YouTube `video_id` into a playable audio stream.
 2. **Stream extraction** — `yt-dlp`, info only (`skip_download=True`)
    - `prefer="opus"`: itag 251 (WebM/Opus ~160 kbps), fallback itag 140
    - `prefer="aac"`: itag 140 (M4A/AAC ~128 kbps), fallback itag 251
-   - The client asks for `aac` when the webview cannot play WebM/Opus (older
-     iOS), and retries as `aac` if Opus playback fails.
+   - The client chooses the format in `frontend/audio-format.js`: iOS/iPadOS
+     always gets `aac`, other platforms get Opus only when `canPlayType`
+     answers `"probably"`. The choice survives track changes and is reused by
+     prefetch; if Opus still fails during playback, the client retries as `aac`.
 3. **Relay** — `/audio/{video_id}` streams the CDN response to the browser,
    forwarding `Range` so seeking works. On CDN 403/410 the URL is re-resolved once.
 
