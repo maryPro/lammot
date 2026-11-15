@@ -38,6 +38,7 @@ import re
 import threading
 import time
 from collections import Counter
+from contextlib import ExitStack
 from typing import Dict, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
@@ -134,6 +135,9 @@ _RESOLVE_SEMAPHORE = threading.BoundedSemaphore(_RESOLVE_CONCURRENCY)
 # occupy one of the user resolve slots (a tap and the radio prefetch already
 # use both of them).
 _CANARY_SEMAPHORE = threading.BoundedSemaphore(1)
+# At most one background prefetch may occupy a resolve slot, so a user tap
+# always finds a free slot even while search results are being warmed.
+_PREFETCH_GUARD = threading.BoundedSemaphore(1)
 _MIN_RESOLVE_INTERVAL = _env_float("YTDLP_MIN_RESOLVE_INTERVAL", 0.0)
 _RESOLVE_PACING_LOCK = threading.Lock()
 _last_resolve_at = 0.0
@@ -716,6 +720,7 @@ def get_stream_url(
     force: bool = False,
     cookiefile: Optional[str] = None,
     dedicated: bool = False,
+    prefetch: bool = False,
 ) -> str:
     """
     Return a direct HTTPS audio CDN URL for a YouTube video.
@@ -736,6 +741,10 @@ def get_stream_url(
     dedicated:
         Use the canary's own semaphore instead of the shared user slots.
         Used by the canary so it never delays a tap.
+    prefetch:
+        Background warm-up.  At most one prefetch may occupy a resolve slot;
+        other prefetches wait without taking a slot, so a tap is never queued
+        behind background work.
 
     Raises
     ------
@@ -769,8 +778,13 @@ def get_stream_url(
             raise BotCheckError("YouTube bot check is active; resolver paused")
 
     # --- Cache miss: resolve once per key, even under concurrent requests ---
-    lock = _resolve_lock(key)
-    with lock:
+    with ExitStack() as stack:
+        # A prefetch waits for the guard before it takes a resolve slot, so it
+        # can never occupy the slot a tap would use.
+        if prefetch and not dedicated:
+            stack.enter_context(_PREFETCH_GUARD)
+        stack.enter_context(_resolve_lock(key))
+
         if not force:
             negative = cache_get(_negative_key(key))
             if negative is not None:
@@ -786,21 +800,21 @@ def get_stream_url(
 
         logger.info("Resolver: cache miss — resolving via yt-dlp for %s", key)
         semaphore = _CANARY_SEMAPHORE if dedicated else _RESOLVE_SEMAPHORE
-        with semaphore:
-            _pace_resolve()
-            try:
-                stream_url, headers, _account = _resolve_with_accounts(
-                    video_id, prefer, cookiefile
-                )
-            except UnavailableError as exc:
-                if not force:
-                    kind = "video" if isinstance(exc, VideoUnavailableError) else "format"
-                    cache_set(_negative_key(key), kind, ttl=_NEGATIVE_TTL)
-                _record_failure(exc)
-                raise
-            except (BotCheckError, TransientResolveError) as exc:
-                _record_failure(exc)
-                raise
+        stack.enter_context(semaphore)
+        _pace_resolve()
+        try:
+            stream_url, headers, _account = _resolve_with_accounts(
+                video_id, prefer, cookiefile
+            )
+        except UnavailableError as exc:
+            if not force:
+                kind = "video" if isinstance(exc, VideoUnavailableError) else "format"
+                cache_set(_negative_key(key), kind, ttl=_NEGATIVE_TTL)
+            _record_failure(exc)
+            raise
+        except (BotCheckError, TransientResolveError) as exc:
+            _record_failure(exc)
+            raise
 
         ttl = _ttl_for_url(stream_url)
         if ttl > 0:
