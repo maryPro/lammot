@@ -118,7 +118,6 @@ _DEFAULT_CLIENTS: Tuple[str, ...] = ("web_embedded", "default")
 # stops as soon as one set yields a usable format.
 _FAST_CLIENT_SETS: Tuple[Tuple[str, ...], ...] = (
     ("web",),
-    ("web_embedded",),
     ("web_embedded", "default"),
 )
 # Prefetch and taps both race; canary/cookie validation stay serial.
@@ -159,8 +158,11 @@ _RESOLVE_SEMAPHORE = threading.BoundedSemaphore(_RESOLVE_CONCURRENCY)
 # Background extraction threads are bounded too: an early-race win leaves the
 # other clients running for a few seconds, so a fixed pool prevents thread
 # accumulation under rapid tapping.
+# Keep this small: each yt-dlp/Deno extraction uses a few hundred MB, and the
+# Railway container has a 1 GB memory limit.  Two client sets plus this pool
+# cap keeps a normal tap below the limit while still racing the gate.
 _EXTRACT_POOL = ThreadPoolExecutor(
-    max_workers=max(3, _RESOLVE_CONCURRENCY * len(_FAST_CLIENT_SETS)),
+    max_workers=2,
     thread_name_prefix="resolve",
 )
 # The canary gets its own single slot: a scheduled health check must never
@@ -971,10 +973,8 @@ def get_stream_url(
                 video_id,
                 prefer,
                 cookiefile,
-                parallel=not dedicated,
-                max_gate_wait=(
-                    _MAX_AVAILABILITY_WAIT if prefetch else _MAX_TAP_GATE_WAIT
-                ),
+                parallel=not prefetch and not dedicated,
+                max_gate_wait=_MAX_TAP_GATE_WAIT,
             )
         except UnavailableError as exc:
             if not force:
