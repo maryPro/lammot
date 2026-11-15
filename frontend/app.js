@@ -380,8 +380,6 @@
     const row = h('li', { class: 'track', 'data-track': track.video_id }, main);
     if (player.current && player.current.video_id === track.video_id) row.classList.add('is-current');
     if (opts.variant === 'search' || opts.variant === 'shared') row.append(favButton(track));
-    // Warm tracks as soon as they scroll into view, not only on touch.
-    observePrefetch(row, track);
 
     const more = h('button', { class: 'icon-btn more-btn', type: 'button', 'aria-label': `More actions for ${track.title}` }, icon('more'));
     more.addEventListener('click', (e) => { e.stopPropagation(); openTrackMenu(track, opts); });
@@ -606,6 +604,7 @@
 
   async function runSearch(q) {
     if (searchController) searchController.abort();
+    prefetchQueue.length = 0;  // drop warm-ups for the previous query
     searchController = new AbortController();
     const seq = ++searchSeq;
     state.search = { q, status: 'loading', results: state.search.results, error: '' };
@@ -684,6 +683,8 @@
         },
       })));
     body.replaceChildren(list);
+    // Warm only the most likely tap (the first result), not every visible row.
+    if (s.results[0]) setTimeout(() => prefetchTrack(s.results[0]), 0);
   }
 
   // ------------------------------------------------------------ views (screens)
@@ -1095,7 +1096,7 @@
     source: '',
     loadSeq: 0,
     links: new Map(),   // `${video_id}:${format}` → { url, expires }
-    inflight: new Map(), // `${video_id}:${format}` → Promise (dedupe prefetch/click)
+    inflight: new Map(), // `${video_id}:${format}` → { promise, prefetch }
     refilling: false,
     recorded: false,
     format: preferredFormat,
@@ -1107,32 +1108,33 @@
     seeking: false,
   };
 
-  async function streamLink(track, format) {
+  async function streamLink(track, format, { prefetch = false } = {}) {
     const key = `${track.video_id}:${format}`;
     const cached = player.links.get(key);
     if (cached && cached.expires > Date.now()) return cached.url;
     const pending = player.inflight.get(key);
-    if (pending) return pending;
+    // Share a request of the same or higher priority.  A tap must not wait
+    // behind a background warm-up, so it starts its own interactive request.
+    if (pending && (prefetch || !pending.prefetch)) return pending.promise;
 
-    const request = api(`/api/stream/${encodeURIComponent(track.video_id)}?format=${format}`)
+    const warm = prefetch ? '&prefetch=1' : '';
+    const request = api(`/api/stream/${encodeURIComponent(track.video_id)}?format=${format}${warm}`)
       .then((data) => {
         player.links.set(key, { url: data.stream_url, expires: Date.now() + LINK_LIFETIME_MS });
         return data.stream_url;
       })
       .finally(() => {
-        player.inflight.delete(key);
+        const current = player.inflight.get(key);
+        if (current && current.promise === request) player.inflight.delete(key);
       });
-    player.inflight.set(key, request);
+    player.inflight.set(key, { promise: request, prefetch });
     return request;
   }
 
   // Prefetch is bounded: a tap must never queue behind background work, and
   // extra resolves raise the risk of a YouTube bot check.
-  const PREFETCH_LIMIT = 2;
-  const PREFETCH_DELAY_MS = 200;
+  const PREFETCH_LIMIT = 1;
   const prefetchQueue = [];
-  const prefetchTracks = new WeakMap();
-  let prefetchObserver = null;
   let prefetchActive = 0;
 
   function runPrefetchQueue() {
@@ -1140,7 +1142,7 @@
     while (prefetchActive < PREFETCH_LIMIT && prefetchQueue.length) {
       const track = prefetchQueue.shift();
       prefetchActive += 1;
-      streamLink(track, preferredFormat)
+      streamLink(track, preferredFormat, { prefetch: true })
         .catch((err) => {
           if (err instanceof ApiError && err.code === 'bot_check') {
             player.botCheck = true;
@@ -1156,7 +1158,7 @@
 
   function prefetchTrack(track, format = preferredFormat) {
     if (!track || !track.video_id || player.botCheck) return;
-    if (format !== preferredFormat) return streamLink(track, format).catch(() => {});
+    if (format !== preferredFormat) return streamLink(track, format, { prefetch: true }).catch(() => {});
     const key = `${track.video_id}:${format}`;
     const cached = player.links.get(key);
     if (cached && cached.expires > Date.now()) return;
@@ -1164,22 +1166,6 @@
     if (prefetchQueue.some((t) => t.video_id === track.video_id)) return;
     prefetchQueue.push(track);
     runPrefetchQueue();
-  }
-
-  function observePrefetch(row, track) {
-    if (!('IntersectionObserver' in window)) return;
-    if (!prefetchObserver) {
-      prefetchObserver = new IntersectionObserver((entries) => {
-        for (const entry of entries) {
-          if (!entry.isIntersecting) continue;
-          prefetchObserver.unobserve(entry.target);
-          const t = prefetchTracks.get(entry.target);
-          if (t) setTimeout(() => prefetchTrack(t), PREFETCH_DELAY_MS);
-        }
-      }, { rootMargin: '120px' });
-    }
-    prefetchTracks.set(row, track);
-    prefetchObserver.observe(row);
   }
 
   function setLoading(on) {
@@ -1190,6 +1176,7 @@
 
   async function startTrack(track, { remember = true } = {}) {
     unlockAudio();  // must run before the first await, while still inside the tap
+    prefetchQueue.length = 0;  // a tap must not compete with queued warm-ups
     const seq = ++player.loadSeq;
     if (remember && player.current) {
       player.history.push(player.current);
@@ -1650,7 +1637,7 @@
       if (upcoming && !player.botCheck && duration > 0 && duration - audio.currentTime < PREFETCH_SECONDS
           && player.prefetchedFor !== upcoming.video_id) {
         player.prefetchedFor = upcoming.video_id;
-        streamLink(upcoming, preferredFormat).catch(() => {});
+        streamLink(upcoming, preferredFormat, { prefetch: true }).catch(() => {});
       }
     });
     audio.addEventListener('ended', () => { if (!isSilent()) next({ auto: true }); });

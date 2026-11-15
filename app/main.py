@@ -608,6 +608,7 @@ async def api_stream(
     response: Response,
     video_id: str = Path(..., pattern=VIDEO_ID_PATTERN),
     fmt: str = Query("opus", alias="format", pattern="^(opus|aac)$"),
+    prefetch: bool = Query(False, description="Background warm-up request"),
     user: auth.TelegramUser = Depends(current_user),
 ):
     """
@@ -617,7 +618,12 @@ async def api_stream(
     stream_limiter.check(user.id)
     started = time.perf_counter()
     try:
-        cdn_url = await run_in_threadpool(resolver.get_stream_url, video_id, fmt)
+        if prefetch:
+            cdn_url = await run_in_threadpool(
+                resolver.get_stream_url, video_id, fmt, prefetch=True
+            )
+        else:
+            cdn_url = await run_in_threadpool(resolver.get_stream_url, video_id, fmt)
     except resolver.BotCheckError:
         logger.warning(
             "Stream: bot check video_id=%s format=%s", video_id, fmt
@@ -644,7 +650,11 @@ async def api_stream(
 
     resolve_ms = (time.perf_counter() - started) * 1000
     logger.info(
-        "api_stream video_id=%s format=%s resolve_ms=%.0f", video_id, fmt, resolve_ms
+        "api_stream video_id=%s format=%s prefetch=%s resolve_ms=%.0f",
+        video_id,
+        fmt,
+        prefetch,
+        resolve_ms,
     )
     response.headers["Server-Timing"] = f"resolve;dur={resolve_ms:.1f}"
 

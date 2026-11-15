@@ -156,6 +156,13 @@ async def test_stream_aac_format(client, headers):
     m.assert_called_once_with(VID, "aac")
 
 
+async def test_stream_prefetch_flag_reaches_the_resolver(client, headers):
+    with patch("app.main.resolver.get_stream_url", return_value=CDN_URL) as m:
+        r = await client.get(f"/api/stream/{VID}?prefetch=1", headers=headers)
+    assert r.status_code == 200
+    m.assert_called_once_with(VID, "opus", prefetch=True)
+
+
 async def test_stream_rejects_invalid_video_id(client, headers):
     with patch("app.main.resolver.get_stream_url") as m:
         r = await client.get("/api/stream/not-a-valid-id!!", headers=headers)

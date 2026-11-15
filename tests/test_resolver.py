@@ -613,3 +613,40 @@ class TestCanaryIsolation:
 
         user_slot.__enter__.assert_called_once()
         canary_slot.__enter__.assert_not_called()
+
+
+class TestPrefetchPriority:
+    """A tap must never wait behind background prefetch work."""
+
+    @staticmethod
+    def _slot():
+        slot = MagicMock()
+        slot.__enter__ = MagicMock(return_value=None)
+        slot.__exit__ = MagicMock(return_value=False)
+        return slot
+
+    def test_prefetch_acquires_the_guard_before_a_resolve_slot(self):
+        guard = self._slot()
+        user_slot = self._slot()
+
+        with patch("app.resolver._extract_formats", return_value=_FORMATS_BOTH), \
+             patch("app.resolver._PREFETCH_GUARD", guard), \
+             patch("app.resolver._RESOLVE_SEMAPHORE", user_slot):
+            url = get_stream_url("dQw4w9WgXcQ", prefetch=True)
+
+        assert url == _FAKE_URL_251
+        guard.__enter__.assert_called_once()
+        user_slot.__enter__.assert_called_once()
+
+    def test_interactive_resolve_skips_the_prefetch_guard(self):
+        guard = self._slot()
+        user_slot = self._slot()
+
+        with patch("app.resolver._extract_formats", return_value=_FORMATS_BOTH), \
+             patch("app.resolver._PREFETCH_GUARD", guard), \
+             patch("app.resolver._RESOLVE_SEMAPHORE", user_slot):
+            url = get_stream_url("dQw4w9WgXcQ")
+
+        assert url == _FAKE_URL_251
+        guard.__enter__.assert_not_called()
+        user_slot.__enter__.assert_called_once()
