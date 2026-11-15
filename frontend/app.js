@@ -683,8 +683,6 @@
         },
       })));
     body.replaceChildren(list);
-    // Warm only the most likely tap (the first result), not every visible row.
-    if (s.results[0]) setTimeout(() => prefetchTrack(s.results[0]), 0);
   }
 
   // ------------------------------------------------------------ views (screens)
