@@ -367,16 +367,6 @@
       h('span', { class: 'track-artist', text: track.artist || 'Unknown artist' })),
     track.duration_seconds ? h('span', { class: 'track-dur', text: fmtTime(track.duration_seconds) }) : null);
 
-    // Warm the stream link on hover/touch/focus. A tap then reuses the same
-    // in-flight request instead of resolving the track twice.
-    let hoverTimer = 0;
-    main.addEventListener('pointerenter', () => {
-      hoverTimer = setTimeout(() => prefetchTrack(track), 300);
-    });
-    main.addEventListener('pointerleave', () => clearTimeout(hoverTimer));
-    main.addEventListener('focus', () => prefetchTrack(track));
-    main.addEventListener('touchstart', () => prefetchTrack(track), { passive: true });
-
     const row = h('li', { class: 'track', 'data-track': track.video_id }, main);
     if (player.current && player.current.video_id === track.video_id) row.classList.add('is-current');
     if (opts.variant === 'search' || opts.variant === 'shared') row.append(favButton(track));

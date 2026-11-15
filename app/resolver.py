@@ -118,8 +118,8 @@ _DEFAULT_CLIENTS: Tuple[str, ...] = ("web_embedded", "default")
 # stops as soon as one set yields a usable format.
 _FAST_CLIENT_SETS: Tuple[Tuple[str, ...], ...] = (
     ("web",),
-    ("web_embedded",),
     ("web_embedded", "default"),
+    ("web_embedded",),
 )
 # Prefetch and taps both race; canary/cookie validation stay serial.
 _PARALLEL_RESOLVE = True
@@ -798,7 +798,10 @@ def _wait_until_available(fmt: dict, max_wait: float = _MAX_AVAILABILITY_WAIT) -
     if wait <= 0:
         return
     if wait > max_wait:
-        raise FormatUnavailableError(
+        # A gate is a transient condition, not a dead video.  Raising an
+        # UnavailableError here would negative-cache the track and poison the
+        # later tap; the caller should be able to retry or wait on the tap path.
+        raise TransientResolveError(
             f"Format is not available yet (available_at in {int(wait)}s)"
         )
 
