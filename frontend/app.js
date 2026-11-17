@@ -600,7 +600,7 @@
     state.search = { q, status: 'loading', results: state.search.results, error: '' };
     renderHome();
     try {
-      const results = await api(`/api/search?q=${encodeURIComponent(q)}&limit=20`, { signal: searchController.signal });
+      const results = await api(`/api/search?q=${encodeURIComponent(q)}&limit=20&format=${preferredFormat}`, { signal: searchController.signal });
       if (seq !== searchSeq) return;
       state.search = { q, status: 'done', results: results || [], error: '' };
     } catch (err) {

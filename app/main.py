@@ -35,6 +35,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from app import auth, bot, database, radio, resolver, search
+from app.prefetch import SearchPrefetcher
 
 logger = logging.getLogger("lammot.api")
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -107,6 +108,13 @@ CANARY_START_DELAY_SECONDS = max(1, _env_int("CANARY_START_DELAY_SECONDS", 15))
 COOKIE_TEST_TIMEOUT_SECONDS = max(5.0, _env_float("COOKIE_TEST_TIMEOUT_SECONDS", 45.0))
 COOKIES_MAX_BYTES = 100 * 1024
 
+# Server-side prefetch of the top search results.  A single background worker
+# keeps bot-check risk and Deno/CPU load bounded; both limits are clamped.
+SEARCH_PREFETCH_ENABLED = os.getenv("SEARCH_PREFETCH_ENABLED", "1") == "1"
+SEARCH_PREFETCH_TOP_N = min(5, max(1, _env_int("SEARCH_PREFETCH_TOP_N", 3)))
+SEARCH_PREFETCH_QUEUE_SIZE = min(50, max(1, _env_int("SEARCH_PREFETCH_QUEUE_SIZE", 12)))
+
+
 # Alert only on meaningful transitions, never once per failed track.
 _alert_lock = asyncio.Lock()
 _last_alert_seq = 0
@@ -130,6 +138,8 @@ _http_client: Optional[httpx.AsyncClient] = None
 # Strong references to fire-and-forget CDN warm-up tasks, so the event loop
 # does not garbage-collect them before they finish.
 _warm_tasks: set[asyncio.Task] = set()
+# Background prefetcher for the top search results; None when disabled.
+_search_prefetcher: Optional[SearchPrefetcher] = None
 
 
 def _get_http() -> httpx.AsyncClient:
@@ -180,6 +190,18 @@ def _schedule_cdn_warm(url: str, headers: Dict[str, str]) -> None:
     task = asyncio.create_task(_warm_cdn(url, headers))
     _warm_tasks.add(task)
     task.add_done_callback(_warm_tasks.discard)
+
+
+async def _prefetch_resolve(video_id: str, fmt: str) -> tuple[str, Dict[str, str]]:
+    """Resolve through the resolver's background path, then fetch its headers."""
+    url = await run_in_threadpool(
+        resolver.get_stream_url, video_id, fmt, prefetch=True
+    )
+    return url, resolver.get_stream_headers(video_id, fmt)
+
+
+def _prefetch_warm(url: str, headers: Dict[str, str]) -> None:
+    _schedule_cdn_warm(url, headers)
 
 
 def _owner_tg_id() -> Optional[int]:
@@ -307,7 +329,7 @@ async def _stats_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    global _bot_username, _http_client
+    global _bot_username, _http_client, _search_prefetcher
     await database.init_db()
 
     if PUBLIC_URL:
@@ -332,9 +354,21 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         tasks.append(asyncio.create_task(_canary_loop()))
     tasks.append(asyncio.create_task(_stats_loop()))
 
+    if SEARCH_PREFETCH_ENABLED:
+        _search_prefetcher = SearchPrefetcher(
+            _prefetch_resolve,
+            _prefetch_warm,
+            top_n=SEARCH_PREFETCH_TOP_N,
+            queue_size=SEARCH_PREFETCH_QUEUE_SIZE,
+        )
+        await _search_prefetcher.start()
+
     try:
         yield
     finally:
+        if _search_prefetcher is not None:
+            await _search_prefetcher.stop()
+            _search_prefetcher = None
         for task in tasks:
             task.cancel()
         for task in tasks:
@@ -592,6 +626,7 @@ async def api_delete_me(
 async def api_search(
     q: str = Query(..., min_length=1, max_length=200, description="Search query"),
     limit: int = Query(10, ge=1, le=25),
+    format: Literal["opus", "aac"] = Query("opus", alias="format"),
     user: auth.TelegramUser = Depends(current_user),
 ):
     search_limiter.check(user.id)
@@ -600,6 +635,12 @@ async def api_search(
     except Exception:
         logger.exception("Search failed for query=%r", q)
         raise HTTPException(status_code=502, detail="Search service unavailable")
+    if _search_prefetcher is not None:
+        try:
+            _search_prefetcher.enqueue_results(results, format)
+        except Exception:
+            # A prefetch bug must never turn a successful search into a 500.
+            logger.exception("search prefetch enqueue failed")
     return _ok(results)
 
 
