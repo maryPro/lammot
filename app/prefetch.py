@@ -3,9 +3,12 @@ app/prefetch.py — background prefetch of the top search results.
 
 A search response never waits for a resolve.  This module keeps one asyncio
 worker that resolves the first few results through the resolver's prefetch
-path (serial extract, shared per-key lock) and warms the CDN connection, so a
-later tap hits the resolver cache or waits only for the remaining part of an
-in-flight resolve.
+path (the same client race as a tap, but one prefetch slot) and warms the CDN
+connection, so a later tap hits the resolver cache or waits only for the
+remaining part of an in-flight resolve.
+
+A newer search from the same user supersedes that user's queued prefetches, so
+fast typing cannot leave the final query's top results behind stale work.
 
 The resolver and CDN warm-up callbacks are injected by app.main; this module
 must never import app.main (that would be a circular import).
@@ -17,7 +20,7 @@ import asyncio
 import logging
 import re
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Dict, Iterable, Optional, Set, Tuple
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Tuple
 
 from app import resolver
 
@@ -33,6 +36,8 @@ WarmCallback = Callable[[str, Dict[str, str]], None]
 class PrefetchJob:
     video_id: str
     format: str
+    owner: Any = None
+    generation: int = 0
 
 
 class SearchPrefetcher:
@@ -52,14 +57,30 @@ class SearchPrefetcher:
         self._queue: asyncio.Queue[PrefetchJob] = asyncio.Queue(
             maxsize=max(1, int(queue_size))
         )
-        self._pending: Set[Tuple[str, str]] = set()
+        # How many queued or in-flight jobs currently reference a cache key.
+        self._pending: Dict[Tuple[str, str], int] = {}
+        # Latest search generation per user, used to drop stale queued work.
+        self._generations: Dict[Any, int] = {}
         self._task: Optional[asyncio.Task] = None
 
-    def enqueue_results(self, results: Iterable[dict], format: str) -> int:
+    def enqueue_results(
+        self,
+        results: Iterable[dict],
+        format: str,
+        *,
+        owner: Any = None,
+    ) -> int:
         """
         Queue up to ``top_n`` unique valid results.  Never blocks, never
         raises: a full queue or a malformed result is simply skipped.
+
+        A newer call for the same ``owner`` drops that owner's older queued
+        jobs, so the latest search is not stuck behind previous keystrokes.
         """
+        generation = self._generations.get(owner, 0) + 1
+        self._generations[owner] = generation
+        self._drop_stale(owner, generation)
+
         enqueued = 0
         for item in results or ():
             if enqueued >= self._top_n:
@@ -71,10 +92,12 @@ class SearchPrefetcher:
                 logger.debug("search_prefetch skipped invalid video_id format=%s", format)
                 continue
             key = (video_id, format)
-            if key in self._pending:
+            if self._pending.get(key, 0) > 0:
                 continue
             try:
-                self._queue.put_nowait(PrefetchJob(video_id, format))
+                self._queue.put_nowait(
+                    PrefetchJob(video_id, format, owner, generation)
+                )
             except asyncio.QueueFull:
                 logger.info(
                     "search_prefetch dropped video_id=%s format=%s reason=queue_full",
@@ -82,7 +105,7 @@ class SearchPrefetcher:
                     format,
                 )
                 break
-            self._pending.add(key)
+            self._pending[key] = self._pending.get(key, 0) + 1
             enqueued += 1
             logger.info(
                 "search_prefetch enqueued video_id=%s format=%s", video_id, format
@@ -106,6 +129,36 @@ class SearchPrefetcher:
         except Exception:
             logger.exception("search_prefetch worker failed")
 
+    def _release(self, job: PrefetchJob) -> None:
+        key = (job.video_id, job.format)
+        count = self._pending.get(key, 0) - 1
+        if count > 0:
+            self._pending[key] = count
+        else:
+            self._pending.pop(key, None)
+
+    def _drop_stale(self, owner: Any, generation: int) -> None:
+        kept: List[PrefetchJob] = []
+        dropped = 0
+        while True:
+            try:
+                job = self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if job.owner == owner and job.generation < generation:
+                self._release(job)
+                dropped += 1
+            else:
+                kept.append(job)
+        # Re-putting a job adds a new unfinished count, so close the old one
+        # for every drained item (kept and dropped) to keep queue.join() sane.
+        for job in kept:
+            self._queue.put_nowait(job)
+        for _ in range(len(kept) + dropped):
+            self._queue.task_done()
+        if dropped:
+            logger.info("search_prefetch superseded count=%d", dropped)
+
     def _drain(self) -> None:
         drained = 0
         while True:
@@ -113,7 +166,7 @@ class SearchPrefetcher:
                 job = self._queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
-            self._pending.discard((job.video_id, job.format))
+            self._release(job)
             self._queue.task_done()
             drained += 1
         if drained:
@@ -123,6 +176,14 @@ class SearchPrefetcher:
         while True:
             job = await self._queue.get()
             try:
+                if job.generation < self._generations.get(job.owner, job.generation):
+                    logger.info(
+                        "search_prefetch skipped video_id=%s format=%s "
+                        "reason=superseded",
+                        job.video_id,
+                        job.format,
+                    )
+                    continue
                 url, headers = await self._resolve(job.video_id, job.format)
                 self._warm(url, headers)
                 logger.info(
@@ -153,5 +214,5 @@ class SearchPrefetcher:
                     type(exc).__name__,
                 )
             finally:
-                self._pending.discard((job.video_id, job.format))
+                self._release(job)
                 self._queue.task_done()

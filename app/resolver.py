@@ -798,7 +798,7 @@ def _resolve_via_ytdlp(
     parallel: bool = True,
     max_gate_wait: float = _MAX_TAP_GATE_WAIT,
 ) -> Tuple[str, Dict[str, str]]:
-    """Dispatch to the parallel race for normal playback, serial for canary."""
+    """Dispatch to the parallel race for playback and prefetch, serial for canary."""
     if parallel and _PARALLEL_RESOLVE:
         return _resolve_parallel(video_id, prefer, cookiefile, max_gate_wait)
     return _resolve_serial(video_id, prefer, cookiefile)
@@ -940,9 +940,10 @@ def get_stream_url(
         Use the canary's own semaphore instead of the shared user slots.
         Used by the canary so it never delays a tap.
     prefetch:
-        Background warm-up.  At most one prefetch may occupy a resolve slot;
-        other prefetches wait without taking a slot, so a tap is never queued
-        behind background work.
+        Background warm-up.  It uses the same client race as a tap, so it
+        survives the same pre-roll gates.  At most one prefetch may occupy a
+        resolve slot; other prefetches wait without taking a slot, so a tap is
+        never queued behind background work.
 
     Raises
     ------
@@ -1005,7 +1006,7 @@ def get_stream_url(
                 video_id,
                 prefer,
                 cookiefile,
-                parallel=not prefetch and not dedicated,
+                parallel=not dedicated,
                 max_gate_wait=_MAX_TAP_GATE_WAIT,
             )
         except UnavailableError as exc:

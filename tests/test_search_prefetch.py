@@ -25,6 +25,8 @@ VID = "dQw4w9WgXcQ"
 VID2 = "9bZkp7q19f0"
 VID3 = "kJQP7kiw5Fk"
 VID4 = "abcdefghijk"
+VID5 = "lmnopqrstuv"
+VID6 = "wxyzABCDEFG"
 
 
 def make_tma_header(user_id: int = 123456) -> str:
@@ -79,7 +81,7 @@ async def test_search_enqueues_results_with_requested_format(client, headers):
 
     assert r.status_code == 200
     assert r.json() == {"ok": True, "data": fake_results}
-    fake.enqueue_results.assert_called_once_with(fake_results, "aac")
+    fake.enqueue_results.assert_called_once_with(fake_results, "aac", owner=123456)
 
 
 async def test_search_does_not_fail_when_prefetch_enqueue_raises(client, headers):
@@ -135,6 +137,76 @@ async def test_enqueues_only_top_three_unique():
         (VID2, "opus"),
         (VID3, "opus"),
     ]
+
+
+async def test_new_search_drops_stale_jobs_for_the_same_owner():
+    async def resolve(video_id, fmt):
+        return "https://cdn.example/audio", {}
+
+    prefetcher = _prefetcher(resolve)
+    prefetcher.enqueue_results(_results(VID, VID2, VID3), "opus", owner=1)
+    count = prefetcher.enqueue_results(_results(VID4, VID5, VID6), "opus", owner=1)
+
+    assert count == 3
+    jobs = _drain(prefetcher)
+    assert [(job.video_id, job.format) for job in jobs] == [
+        (VID4, "opus"),
+        (VID5, "opus"),
+        (VID6, "opus"),
+    ]
+
+
+async def test_new_search_keeps_other_owners_jobs():
+    async def resolve(video_id, fmt):
+        return "https://cdn.example/audio", {}
+
+    prefetcher = _prefetcher(resolve)
+    prefetcher.enqueue_results(_results(VID, VID2, VID3), "opus", owner=1)
+    prefetcher.enqueue_results(_results(VID4, VID5, VID6), "opus", owner=2)
+
+    jobs = _drain(prefetcher)
+    assert [job.video_id for job in jobs] == [VID, VID2, VID3, VID4, VID5, VID6]
+
+
+async def test_worker_resolves_only_the_newest_search():
+    resolved = []
+
+    async def resolve(video_id, fmt):
+        resolved.append(video_id)
+        return "https://cdn.example/audio", {}
+
+    prefetcher = _prefetcher(resolve)
+    prefetcher.enqueue_results(_results(VID, VID2, VID3), "opus", owner=1)
+    prefetcher.enqueue_results(_results(VID4, VID5, VID6), "opus", owner=1)
+
+    await prefetcher.start()
+    try:
+        await asyncio.wait_for(prefetcher._queue.join(), 1)
+    finally:
+        await prefetcher.stop()
+
+    assert resolved == [VID4, VID5, VID6]
+
+
+async def test_superseding_one_owner_keeps_join_working_for_others():
+    resolved = []
+
+    async def resolve(video_id, fmt):
+        resolved.append(video_id)
+        return "https://cdn.example/audio", {}
+
+    prefetcher = _prefetcher(resolve)
+    prefetcher.enqueue_results(_results(VID, VID2, VID3), "opus", owner=1)
+    prefetcher.enqueue_results(_results(VID4, VID5, VID6), "opus", owner=2)
+    prefetcher.enqueue_results(_results(VID,), "opus", owner=1)
+
+    await prefetcher.start()
+    try:
+        await asyncio.wait_for(prefetcher._queue.join(), 1)
+    finally:
+        await prefetcher.stop()
+
+    assert resolved == [VID4, VID5, VID6, VID]
 
 
 async def test_worker_resolves_and_warms_in_order():

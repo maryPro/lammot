@@ -871,14 +871,33 @@ class TestParallelResolution:
         race.assert_called_once()
         serial.assert_called_once()
 
-    def test_prefetch_uses_the_serial_path(self, monkeypatch):
+    def test_prefetch_uses_the_parallel_race(self, monkeypatch):
         monkeypatch.setattr(resolver, "_PARALLEL_RESOLVE", True)
-        with patch("app.resolver._resolve_parallel") as race, \
+        with patch("app.resolver._resolve_parallel", return_value=(_FAKE_URL_18, {})) as race, \
              patch("app.resolver._resolve_serial", return_value=(_FAKE_URL_18, {})) as serial:
-            get_stream_url("dQw4w9WgXcQ", prefetch=True)
+            url = get_stream_url("dQw4w9WgXcQ", prefetch=True)
 
-        race.assert_not_called()
-        serial.assert_called_once()
+        assert url == _FAKE_URL_18
+        race.assert_called_once()
+        serial.assert_not_called()
+        assert race.call_args.args[3] == resolver._MAX_TAP_GATE_WAIT
+
+    def test_prefetch_race_survives_a_gate_that_serial_rejects(self, monkeypatch):
+        """A gated web pass must not make prefetch give up while a tap would win."""
+        monkeypatch.setattr(resolver, "_PARALLEL_RESOLVE", True)
+        now = 1_800_000_000
+        gated = [{"format_id": "18", "url": _FAKE_URL_18, "available_at": now + 4}]
+        ungated = [{"format_id": "140", "url": _FAKE_URL_140}]
+        by_clients = self._by_clients(gated, ungated, gated)
+
+        def fake_extract(_video_id, clients, _cookiefile=None):
+            return by_clients[clients]
+
+        with patch("app.resolver._extract_formats", side_effect=fake_extract), \
+             patch("time.time", return_value=now):
+            url = get_stream_url("dQw4w9WgXcQ", "aac", prefetch=True)
+
+        assert url == _FAKE_URL_140
 
     def test_tap_gate_wait_is_three_seconds(self, monkeypatch):
         monkeypatch.setattr(resolver, "_PARALLEL_RESOLVE", True)

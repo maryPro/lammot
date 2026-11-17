@@ -637,7 +637,7 @@ async def api_search(
         raise HTTPException(status_code=502, detail="Search service unavailable")
     if _search_prefetcher is not None:
         try:
-            _search_prefetcher.enqueue_results(results, format)
+            _search_prefetcher.enqueue_results(results, format, owner=user.id)
         except Exception:
             # A prefetch bug must never turn a successful search into a 500.
             logger.exception("search prefetch enqueue failed")
