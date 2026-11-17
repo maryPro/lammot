@@ -1058,6 +1058,7 @@
   // Survives per-track resets: once a format is known to work here, every
   // later track and prefetch asks for it instead of paying a second resolve.
   let preferredFormat = AUDIO_FORMAT;
+  const { pickDuration, progressRatio } = window.LammotTime;
 
   // A play() call made directly inside a tap "unlocks" the <audio> element;
   // after that, play() also works after awaiting the network (next songs,
@@ -1095,6 +1096,13 @@
     loading: false,
     seeking: false,
   };
+
+  // Track metadata is the source of truth: some iOS webviews report a
+  // doubled media duration. Fall back to the media element only when the
+  // track has no duration or playback runs past it.
+  function playbackDuration() {
+    return pickDuration(audio.duration, player.current && player.current.duration_seconds, audio.currentTime);
+  }
 
   async function streamLink(track, format, { prefetch = false } = {}) {
     const key = `${track.video_id}:${format}`;
@@ -1420,7 +1428,7 @@
   }
 
   function renderProgress(current, duration) {
-    const ratio = duration > 0 ? Math.min(1, current / duration) : 0;
+    const ratio = progressRatio(current, duration);
     $('mini-progress').style.transform = `scaleX(${ratio})`;
     if (!player.seeking) {
       const seek = $('fp-seek');
@@ -1593,13 +1601,13 @@
     const seek = $('fp-seek');
     seek.addEventListener('input', () => {
       player.seeking = true;
-      const duration = audio.duration || (player.current && player.current.duration_seconds) || 0;
+      const duration = playbackDuration();
       const ratio = Number(seek.value) / 1000;
       seek.style.setProperty('--fill', `${ratio * 100}%`);
       $('fp-elapsed').textContent = fmtTime(ratio * duration);
     });
     seek.addEventListener('change', () => {
-      const duration = audio.duration || (player.current && player.current.duration_seconds) || 0;
+      const duration = playbackDuration();
       if (duration > 0) audio.currentTime = (Number(seek.value) / 1000) * duration;
       player.seeking = false;
     });
@@ -1616,9 +1624,7 @@
     });
     audio.addEventListener('timeupdate', () => {
       if (isSilent()) return;
-      const duration = Number.isFinite(audio.duration) && audio.duration > 0
-        ? audio.duration
-        : (player.current && player.current.duration_seconds) || 0;
+      const duration = playbackDuration();
       renderProgress(audio.currentTime, duration);
       // Lazy resolve: get the next song's link ~15 s before this one ends
       const upcoming = player.queue[0];
@@ -1628,6 +1634,12 @@
         streamLink(upcoming, preferredFormat, { prefetch: true }).catch(() => {});
       }
     });
+    for (const evt of ['loadedmetadata', 'durationchange']) {
+      audio.addEventListener(evt, () => {
+        if (isSilent()) return;
+        renderProgress(audio.currentTime, playbackDuration());
+      });
+    }
     audio.addEventListener('ended', () => { if (!isSilent()) next({ auto: true }); });
     audio.addEventListener('error', onMediaError);
 

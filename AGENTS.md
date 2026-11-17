@@ -21,6 +21,8 @@ Lammot — Telegram Mini App: музыкальный плеер.
   `/Users/mariia/lammot-main/venv/bin/python -m pytest -m "not integration" -v`
 - Интеграционные тесты (реальный YouTube):
   `python -m pytest -m integration -v` — только по явному запросу.
+- JS-тесты (встроенный Node test runner, без npm):
+  `node --test tests/js/player-time.test.js`
 - Локальный запуск:
   `uvicorn app.main:app --env-file .env --port 8000 --reload`
   (нужен активированный `venv`).
