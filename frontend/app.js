@@ -1058,7 +1058,7 @@
   // Survives per-track resets: once a format is known to work here, every
   // later track and prefetch asks for it instead of paying a second resolve.
   let preferredFormat = AUDIO_FORMAT;
-  const { pickDuration, progressRatio } = window.LammotTime;
+  const { pickDuration, progressRatio, shouldForceTrackEnd } = window.LammotTime;
 
   // A play() call made directly inside a tap "unlocks" the <audio> element;
   // after that, play() also works after awaiting the network (next songs,
@@ -1095,6 +1095,7 @@
     botCheck: false,
     loading: false,
     seeking: false,
+    forcedEnd: false,
   };
 
   // Track metadata is the source of truth: some iOS webviews report a
@@ -1180,6 +1181,7 @@
     }
     player.current = track;
     player.recorded = false;
+    player.forcedEnd = false;
     player.format = preferredFormat;
     player.triedFallback = false;
     player.prefetchedFor = null;
@@ -1624,6 +1626,16 @@
     });
     audio.addEventListener('timeupdate', () => {
       if (isSilent()) return;
+      const track = player.current && player.current.duration_seconds;
+      if (!player.loading && shouldForceTrackEnd(audio.duration, track, audio.currentTime)) {
+        // iOS reports a doubled duration and keeps ticking through silence
+        // after the real end, so "ended" may never arrive on time.
+        if (!player.forcedEnd) {
+          player.forcedEnd = true;
+          next({ auto: true });
+        }
+        return;
+      }
       const duration = playbackDuration();
       renderProgress(audio.currentTime, duration);
       // Lazy resolve: get the next song's link ~15 s before this one ends
