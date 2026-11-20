@@ -482,8 +482,18 @@ body.has-mini .app {
 .icon-pause { display: none; }
 .is-playing .icon-play { display: none; }
 .is-playing .icon-pause { display: block; }
-.is-loading .play-btn,
-.is-loading .fp-play { opacity: 0.55; }
+.is-loading .play-btn .icon,
+.is-loading .fp-play .icon { display: none; }
+.is-loading .play-btn::after,
+.is-loading .fp-play::after {
+  content: "";
+  width: 18px;
+  height: 18px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
 
 /* ---------------------------------------------------------------- tab bar */
 .tabbar {
