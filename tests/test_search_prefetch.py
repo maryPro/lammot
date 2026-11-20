@@ -57,6 +57,8 @@ async def client(temp_db):
 def _prefetcher(resolve, warm=None, **kwargs):
     from app.prefetch import SearchPrefetcher
 
+    # Existing behavior tests must not pay the production settle window.
+    kwargs.setdefault("settle_seconds", 0)
     return SearchPrefetcher(resolve, warm or (lambda url, headers: None), **kwargs)
 
 
@@ -81,7 +83,10 @@ async def test_search_enqueues_results_with_requested_format(client, headers):
 
     assert r.status_code == 200
     assert r.json() == {"ok": True, "data": fake_results}
-    fake.enqueue_results.assert_called_once_with(fake_results, "aac", owner=123456)
+    q_hash = hashlib.sha256(b"x").hexdigest()[:10]
+    fake.enqueue_results.assert_called_once_with(
+        fake_results, "aac", owner=123456, request_key=q_hash
+    )
 
 
 async def test_search_does_not_fail_when_prefetch_enqueue_raises(client, headers):
@@ -317,3 +322,95 @@ async def test_stop_cancels_worker():
     await prefetcher.stop()
 
     assert prefetcher._task is None
+
+
+# ------------------------------------------- settle window and deduplication
+async def test_settle_drops_superseded_job_before_extraction():
+    """A stale queued job must be discarded before it spends a yt-dlp slot."""
+    resolved = []
+
+    async def resolve(video_id, fmt, should_stop=None):
+        resolved.append(video_id)
+        return "https://cdn.example/audio", {}
+
+    prefetcher = _prefetcher(resolve, settle_seconds=0.2)
+    await prefetcher.start()
+    try:
+        prefetcher.enqueue_results(_results(VID), "opus", owner=1)
+        await asyncio.sleep(0.05)
+        prefetcher.enqueue_results(_results(VID2), "opus", owner=1)
+        await asyncio.wait_for(prefetcher._queue.join(), 2)
+    finally:
+        await prefetcher.stop()
+
+    assert resolved == [VID2]
+
+
+async def test_latest_generation_is_processed_after_stale_settle():
+    """Several fast keystrokes leave only the final query's top result."""
+    resolved = []
+
+    async def resolve(video_id, fmt, should_stop=None):
+        resolved.append(video_id)
+        return "https://cdn.example/audio", {}
+
+    prefetcher = _prefetcher(resolve, settle_seconds=0.15)
+    await prefetcher.start()
+    try:
+        prefetcher.enqueue_results(_results(VID), "opus", owner=1)
+        await asyncio.sleep(0.03)
+        prefetcher.enqueue_results(_results(VID2), "opus", owner=1)
+        await asyncio.sleep(0.03)
+        prefetcher.enqueue_results(_results(VID3), "opus", owner=1)
+        await asyncio.wait_for(prefetcher._queue.join(), 2)
+    finally:
+        await prefetcher.stop()
+
+    assert resolved == [VID3]
+
+
+async def test_settle_zero_keeps_existing_behavior():
+    resolved = []
+
+    async def resolve(video_id, fmt, should_stop=None):
+        resolved.append(video_id)
+        return "https://cdn.example/audio", {}
+
+    prefetcher = _prefetcher(resolve, settle_seconds=0)
+    await prefetcher.start()
+    try:
+        prefetcher.enqueue_results(_results(VID), "opus", owner=1)
+        await asyncio.wait_for(prefetcher._queue.join(), 1)
+    finally:
+        await prefetcher.stop()
+
+    assert resolved == [VID]
+
+
+async def test_duplicate_result_signature_is_skipped_within_window():
+    async def resolve(video_id, fmt, should_stop=None):
+        return "https://cdn.example/audio", {}
+
+    prefetcher = _prefetcher(resolve, settle_seconds=0, dedupe_seconds=60)
+    first = prefetcher.enqueue_results(_results(VID2, VID), "opus", owner=1)
+    second = prefetcher.enqueue_results(_results(VID, VID2), "opus", owner=1)
+
+    assert (first, second) == (2, 0)
+    assert prefetcher._queue.qsize() == 2
+
+
+async def test_same_signature_is_allowed_after_dedupe_window():
+    async def resolve(video_id, fmt, should_stop=None):
+        return "https://cdn.example/audio", {}
+
+    prefetcher = _prefetcher(resolve, settle_seconds=0, dedupe_seconds=0.03)
+    await prefetcher.start()
+    try:
+        assert prefetcher.enqueue_results(_results(VID), "opus", owner=1) == 1
+        await asyncio.wait_for(prefetcher._queue.join(), 1)
+        await asyncio.sleep(0.05)
+        assert prefetcher.enqueue_results(_results(VID), "opus", owner=1) == 1
+        await asyncio.wait_for(prefetcher._queue.join(), 1)
+    finally:
+        await prefetcher.stop()
+

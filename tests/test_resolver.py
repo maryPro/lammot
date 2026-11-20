@@ -871,16 +871,17 @@ class TestParallelResolution:
         race.assert_called_once()
         serial.assert_called_once()
 
-    def test_prefetch_uses_the_parallel_race(self, monkeypatch):
+    def test_prefetch_uses_the_sequential_prefetch_path(self, monkeypatch):
         monkeypatch.setattr(resolver, "_PARALLEL_RESOLVE", True)
-        with patch("app.resolver._resolve_parallel", return_value=(_FAKE_URL_18, {})) as race, \
+        with patch("app.resolver._resolve_prefetch", return_value=(_FAKE_URL_18, {})) as prefetch, \
+             patch("app.resolver._resolve_parallel", return_value=(_FAKE_URL_18, {})) as race, \
              patch("app.resolver._resolve_serial", return_value=(_FAKE_URL_18, {})) as serial:
             url = get_stream_url("dQw4w9WgXcQ", prefetch=True)
 
         assert url == _FAKE_URL_18
-        race.assert_called_once()
+        prefetch.assert_called_once()
+        race.assert_not_called()
         serial.assert_not_called()
-        assert race.call_args.args[3] == resolver._MAX_TAP_GATE_WAIT
 
     def test_prefetch_race_survives_a_gate_that_serial_rejects(self, monkeypatch):
         """A gated web pass must not make prefetch give up while a tap would win."""
@@ -890,7 +891,7 @@ class TestParallelResolution:
         ungated = [{"format_id": "140", "url": _FAKE_URL_140}]
         by_clients = self._by_clients(gated, ungated, gated)
 
-        def fake_extract(_video_id, clients, _cookiefile=None):
+        def fake_extract(_video_id, clients, _cookiefile=None, **_kwargs):
             return by_clients[clients]
 
         with patch("app.resolver._extract_formats", side_effect=fake_extract), \
@@ -936,3 +937,136 @@ class TestGateCache:
             url = get_stream_url("dQw4w9WgXcQ", prefer="aac")
 
         assert url == _FAKE_URL_140
+
+
+class TestPrefetchExtractionPolicy:
+    """Prefetch must not compete with taps for extraction capacity or cookies."""
+
+    @staticmethod
+    def _readonly_ydl(formats, extract_info=None):
+        mock_ydl = _make_ydl_mock(formats)
+        if extract_info is not None:
+            mock_ydl.extract_info.side_effect = extract_info
+        return MagicMock(return_value=mock_ydl)
+
+    def test_prefetch_uses_at_most_one_extract_slot(self):
+        active = 0
+        peak = 0
+        state_lock = threading.Lock()
+
+        def fake_extract_info(_url, download=False):
+            nonlocal active, peak
+            assert download is False
+            with state_lock:
+                active += 1
+                peak = max(peak, active)
+            time.sleep(0.05)
+            with state_lock:
+                active -= 1
+            return {"formats": _FORMATS_BOTH}
+
+        readonly = self._readonly_ydl(_FORMATS_BOTH, fake_extract_info)
+
+        def worker():
+            resolver._extract_formats("dQw4w9WgXcQ", ("web",), prefetch=True)
+
+        with patch("app.resolver._ReadOnlyCookieYoutubeDL", readonly):
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                list(pool.map(lambda _: worker(), range(4)))
+
+        assert peak == 1
+
+    def test_tap_can_extract_while_prefetch_holds_its_slot(self):
+        prefetch_started = threading.Event()
+        release_prefetch = threading.Event()
+
+        def slow_extract(_url, download=False):
+            assert download is False
+            prefetch_started.set()
+            assert release_prefetch.wait(2)
+            return {"formats": _FORMATS_BOTH}
+
+        prefetch_ydl = self._readonly_ydl(_FORMATS_BOTH, slow_extract)
+        tap_ydl = _make_ydl_mock(_FORMATS_BOTH)
+        tap_class = MagicMock(return_value=tap_ydl)
+
+        with patch("app.resolver._ReadOnlyCookieYoutubeDL", prefetch_ydl), \
+             patch("app.resolver.yt_dlp.YoutubeDL", tap_class):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                prefetch_future = pool.submit(
+                    resolver._extract_formats, "dQw4w9WgXcQ", ("web",),
+                    None, prefetch=True,
+                )
+                assert prefetch_started.wait(2)
+                tap_future = pool.submit(
+                    resolver._extract_formats, "dQw4w9WgXcQ", ("web",),
+                )
+                result = tap_future.result(timeout=2)
+                release_prefetch.set()
+                prefetch_future.result(timeout=2)
+
+        assert result == _FORMATS_BOTH
+
+    def test_prefetch_does_not_save_cookies(self, tmp_path):
+        target = tmp_path / "cookies.txt"
+        ydl = resolver._ReadOnlyCookieYoutubeDL({"quiet": True})
+
+        ydl.save_cookies(str(target))
+
+        assert not target.exists()
+
+    def test_prefetch_extraction_uses_the_read_only_ydl(self):
+        mock_ydl = _make_ydl_mock(_FORMATS_BOTH)
+
+        with patch(
+            "app.resolver._ReadOnlyCookieYoutubeDL", return_value=mock_ydl
+        ) as readonly, \
+             patch("app.resolver.yt_dlp.YoutubeDL") as tap_class:
+            resolver._extract_formats("dQw4w9WgXcQ", ("web",), prefetch=True)
+
+        readonly.assert_called_once()
+        tap_class.assert_not_called()
+
+    def test_prefetch_should_stop_between_client_attempts(self):
+        now = 1_800_000_000
+        gated = [{"format_id": "18", "url": _FAKE_URL_18, "available_at": now + 5}]
+        calls = []
+        state = {"stop": False}
+
+        def should_stop():
+            return state["stop"]
+
+        def fake_extract(_video_id, clients, _cookiefile=None, **_kwargs):
+            calls.append(clients)
+            state["stop"] = True
+            return gated
+
+        with patch("app.resolver._extract_formats", side_effect=fake_extract), \
+             patch("time.time", return_value=now):
+            with pytest.raises(resolver.PrefetchCancelled):
+                resolver._resolve_prefetch(
+                    "dQw4w9WgXcQ", "aac", should_stop=should_stop
+                )
+
+        assert calls == [resolver._FAST_CLIENT_SETS[0]]
+
+    def test_cancelled_prefetch_does_not_populate_cache(self):
+        from app.cache import cache_get
+
+        state = {"stop": False}
+
+        def should_stop():
+            return state["stop"]
+
+        def fake_extract(_video_id, _clients, _cookiefile=None, **_kwargs):
+            state["stop"] = True
+            return _FORMATS_BOTH
+
+        with patch("app.resolver._extract_formats", side_effect=fake_extract):
+            with pytest.raises(resolver.PrefetchCancelled):
+                get_stream_url(
+                    "dQw4w9WgXcQ", prefetch=True, should_stop=should_stop
+                )
+
+        assert cache_get("dQw4w9WgXcQ") is None
+        assert cache_get("dQw4w9WgXcQ:unavailable") is None
