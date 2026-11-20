@@ -1,9 +1,9 @@
 # LammotBot — Architecture
 
 **Telegram Mini App Music Player**
-Version: 1.4 | Stack: Python + FastAPI + SQLite + HTML/CSS/JS | Deploy: Docker on Railway
+Version: 1.5 | Stack: Python + FastAPI + SQLite + HTML/CSS/JS | Deploy: Docker on Railway
 
-Last verified against: `PR #28` (2026-11-20)
+Last verified against: `main` + Extended search (PR pending, 2026-11-21)
 Project status: [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)
 
 ---
@@ -33,6 +33,15 @@ user's phone, so the browser would get 403. The relay costs egress traffic
 
 Key behaviors spread across backend and client:
 
+- **Songs and Extended search** — `app/search.py` exposes two entry points.
+  `search_songs()` calls ytmusicapi with `filter="songs"` and stays the default.
+  `search_videos()` calls it with `filter="videos"` for the opt-in Extended tab:
+  it asks for up to 25 raw results, then keeps only items with an 11-character
+  id, a known duration inside 45–900 s, and no live/upcoming flag. Exactly
+  15:00 is included; unknown durations are dropped. Video results carry
+  `"kind": "video"`; song results may omit `kind` and the client treats a
+  missing `kind` as a song. A malformed item is skipped, but upstream
+  ytmusicapi errors propagate so `/api/search` can answer 502.
 - **Background prefetch of search results** — after `/api/search` answers,
   `app/prefetch.py` resolves the top 3 results in the background so a tap hits
   a warm resolver cache. A newer search from the same user supersedes older
@@ -65,7 +74,7 @@ lammot/
 │   │                    #   canary loop, rate limiters, search prefetch wiring
 │   ├── auth.py          # Telegram initData verification, signed audio links
 │   ├── bot.py           # Bot API: setWebhook, menu button, /start reply, /cookies parsing
-│   ├── search.py        # ytmusicapi search (official songs only)
+│   ├── search.py        # ytmusicapi search: official songs + Extended videos
 │   ├── resolver.py      # yt-dlp stream resolver: format choice, gate race, cookies,
 │   │                    #   concurrency limits, resolver state
 │   ├── cache.py         # In-memory TTL cache for stream URLs and headers
@@ -78,6 +87,8 @@ lammot/
 │   ├── style.css        # Design tokens, themes, accents, wallpaper, layout
 │   ├── app.js           # All UI logic: search, screens, player, queue, MediaSession
 │   ├── audio-format.js  # Pure Opus/AAC choice, loaded before app.js
+│   ├── search-query.js  # Pure submit rules (explicit-submit search)
+│   ├── search-tabs.js   # Pure Songs/Extended tab rules
 │   └── player-time.js   # Pure duration/progress helpers (iOS normalization)
 ├── tests/
 │   ├── conftest.py
@@ -89,6 +100,8 @@ lammot/
 │   ├── test_radio.py
 │   ├── test_resolver.py
 │   ├── test_search.py           # integration marker (real YouTube)
+│   ├── test_search_videos.py
+│   ├── test_search_tabs.py      # Runs tests/js/search-tabs.test.js through Node
 │   ├── test_search_prefetch.py
 │   ├── test_audio_format.py     # Runs audio-format.test.js through Node
 │   ├── audio-format.test.js
@@ -236,6 +249,15 @@ Source: `ytmusicapi.get_watch_playlist(videoId=...)`.
   (`MAX_EXCLUDE`).
 - **Diversity filter** — at most one track per artist in any 4 consecutive
   tracks (`_DIVERSITY_WINDOW = 3`, so the last 3 artists are checked).
+- **Artist name** — `artists[0].name`, then `channel`, then `Unknown Artist`.
+- **Video seeds** — `/api/radio?...&kind=video` accepts a video seed (any
+  duration) and filters the queue to known durations of 45–900 s, skipping
+  live/upcoming entries. The first pass keeps the diversity filter; if it
+  returns fewer than `limit` tracks, a second pass fills the queue from the
+  remaining tracks without the diversity filter. The seed itself still plays
+  even when it is longer than 15 minutes.
+- The default remains `kind=song`, which preserves the songs-only behavior
+  without a second pass.
 
 ### Client-side behavior
 
@@ -260,10 +282,10 @@ Tracks always have one shape:
 |---|---|---|---|
 | `GET` | `/api/me` | ✓ | Current user + `share_base` URL for share links |
 | `DELETE` | `/api/me?confirm=true` | ✓ | Delete all of the user's data (204) |
-| `GET` | `/api/search?q=...&limit=10&format=opus\|aac` | ✓ | Search songs (rate limit 60/min). `format` selects the prefetch warm-up format; `limit` is 1–25, default 10 |
+| `GET` | `/api/search?q=...&limit=10&format=opus\|aac&type=songs\|videos` | ✓ | Search songs (default) or Extended videos (rate limit 60/min). Video results are filtered to 45–900 s and carry `kind="video"`. `format` selects the prefetch warm-up format; `limit` is 1–25, default 10 |
 | `GET` | `/api/stream/{video_id}?format=opus\|aac&prefetch=1` | ✓ | Resolve and return a signed `/audio/...` link (60/min). `prefetch=1` marks a background warm-up |
 | `GET` | `/audio/{video_id}?t=...` | signed link | Audio relay with Range support (not in OpenAPI schema) |
-| `GET` | `/api/radio/{video_id}?exclude=...&limit=5` | ✓ | Next radio tracks; up to 50 exclude ids, limit 1–20, default 5 |
+| `GET` | `/api/radio/{video_id}?exclude=...&limit=5&kind=song\|video` | ✓ | Next radio tracks; up to 50 exclude ids, limit 1–20, default 5. `kind=video` filters the queue to 45–900 s videos |
 | `GET` | `/api/favorites` | ✓ | User's favorites, newest first |
 | `POST` | `/api/favorites` | ✓ | Add track `{video_id, title, artist, duration_seconds, thumbnail_url}` |
 | `DELETE` | `/api/favorites/{video_id}` | ✓ | Remove from favorites |

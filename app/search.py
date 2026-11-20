@@ -2,7 +2,8 @@
 app/search.py — Sprint 1: Search Module
 LammotBot Telegram Mini App Music Player
 
-Wraps ytmusicapi to search YouTube Music for official tracks.
+Wraps ytmusicapi to search YouTube Music for official tracks and, opt-in,
+regular YouTube videos (the Extended tab).
 Supports any language query: English, Russian, Ukrainian, etc.
 
 The search mirrors YouTube Music's own engine:
