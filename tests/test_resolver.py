@@ -767,6 +767,7 @@ class TestParallelResolution:
     @staticmethod
     def _by_clients(web, embedded, default):
         return {
+            ("visionos",): web,
             ("web",): web,
             ("web_embedded",): embedded,
             ("web_embedded", "default"): default,
@@ -861,14 +862,14 @@ class TestParallelResolution:
             with pytest.raises(resolver.BotCheckError):
                 resolver._resolve_parallel("dQw4w9WgXcQ", "aac")
 
-    def test_dispatcher_uses_the_race_for_normal_playback(self, monkeypatch):
+    def test_dispatcher_uses_the_tap_fast_path_for_normal_playback(self, monkeypatch):
         monkeypatch.setattr(resolver, "_PARALLEL_RESOLVE", True)
-        with patch("app.resolver._resolve_parallel", return_value=("race", {})) as race, \
+        with patch("app.resolver._resolve_tap", return_value=("tap", {})) as tap, \
              patch("app.resolver._resolve_serial", return_value=("serial", {})) as serial:
-            assert resolver._resolve_via_ytdlp("x", "aac", None, parallel=True)[0] == "race"
+            assert resolver._resolve_via_ytdlp("x", "aac", None, parallel=True)[0] == "tap"
             assert resolver._resolve_via_ytdlp("x", "aac", None, parallel=False)[0] == "serial"
 
-        race.assert_called_once()
+        tap.assert_called_once()
         serial.assert_called_once()
 
     def test_prefetch_uses_the_sequential_prefetch_path(self, monkeypatch):
@@ -902,16 +903,116 @@ class TestParallelResolution:
 
     def test_tap_gate_wait_is_three_seconds(self, monkeypatch):
         monkeypatch.setattr(resolver, "_PARALLEL_RESOLVE", True)
-        with patch("app.resolver._resolve_parallel", return_value=(_FAKE_URL_18, {})) as race:
+        with patch("app.resolver._resolve_tap", return_value=(_FAKE_URL_18, {})) as tap:
             get_stream_url("dQw4w9WgXcQ")
 
         assert resolver._MAX_TAP_GATE_WAIT == 3.0
-        assert race.call_args.args[3] == resolver._MAX_TAP_GATE_WAIT
+        assert tap.call_args.args[3] == resolver._MAX_TAP_GATE_WAIT
 
     def test_extraction_timeout_is_separate_from_the_gate_wait(self):
         """A 3 s total deadline made every cold resolve return 502 at 3.0 s."""
         assert resolver._MAX_TAP_EXTRACT_WAIT >= 10.0
         assert resolver._MAX_TAP_EXTRACT_WAIT > resolver._MAX_TAP_GATE_WAIT
+
+
+class TestVisionosFastPath:
+    """The first tap pass uses the no-JS-challenge client, then falls back."""
+
+    def test_pick_format_accepts_suffixed_audio_track_ids(self):
+        """visionos returns multi-track ids such as 251-0, 140-1."""
+        formats = [
+            {"format_id": "251-0", "url": _FAKE_URL_251},
+            {"format_id": "140-0", "url": _FAKE_URL_140},
+        ]
+
+        assert resolver._pick_format(formats) == formats[0]
+
+    def test_visionos_is_enabled_for_cookie_sessions(self):
+        clients = {"visionos": {"SUPPORTS_COOKIES": False}}
+
+        assert resolver._enable_cookie_client(clients, "visionos") is True
+        assert clients["visionos"]["SUPPORTS_COOKIES"] is True
+        assert resolver._enable_cookie_client({}, "visionos") is False
+
+    def test_cookie_validation_keeps_a_cookie_client(self):
+        """The tap fast client must not replace the cookie-checking client."""
+        assert resolver._TAP_FAST_CLIENTS == ("visionos",)
+        assert resolver._FAST_CLIENTS == ("web",)
+
+    def test_player_clients_env_overrides_the_fast_path(self, monkeypatch):
+        """Operators can disable visionos without a code change."""
+        monkeypatch.setenv("YTDLP_PLAYER_CLIENTS", "web")
+
+        assert resolver._tap_fast_clients() == ("web",)
+        assert resolver._prefetch_client_sets()[0] == ("web",)
+        assert ("visionos",) not in resolver._prefetch_client_sets()
+
+    def test_tap_uses_visionos_and_skips_the_deno_race(self, monkeypatch):
+        monkeypatch.setattr(resolver, "_PARALLEL_RESOLVE", True)
+        calls = []
+
+        def fake_extract(_video_id, clients, _cookiefile=None, **_kwargs):
+            calls.append(clients)
+            return _FORMATS_BOTH
+
+        with patch("app.resolver._extract_formats", side_effect=fake_extract), \
+             patch("app.resolver._resolve_parallel") as race:
+            url = get_stream_url("dQw4w9WgXcQ")
+
+        assert url == _FAKE_URL_251
+        assert calls == [resolver._TAP_FAST_CLIENTS]
+        race.assert_not_called()
+
+    def test_tap_falls_back_to_the_race_when_visionos_is_gated(self, monkeypatch):
+        monkeypatch.setattr(resolver, "_PARALLEL_RESOLVE", True)
+        now = 1_800_000_000
+        gated = [{"format_id": "251", "url": _FAKE_URL_251_LATE, "available_at": now + 6}]
+        ungated = [{"format_id": "251", "url": _FAKE_URL_251_EARLY}]
+        calls = []
+
+        def fake_extract(_video_id, clients, _cookiefile=None, **_kwargs):
+            calls.append(clients)
+            return gated if clients == resolver._TAP_FAST_CLIENTS else ungated
+
+        with patch("app.resolver._extract_formats", side_effect=fake_extract), \
+             patch("time.time", return_value=now):
+            url = get_stream_url("dQw4w9WgXcQ")
+
+        assert url == _FAKE_URL_251_EARLY
+        assert calls[0] == resolver._TAP_FAST_CLIENTS
+        assert len(calls) > 1
+
+    def test_tap_does_not_retry_a_bot_check(self, monkeypatch):
+        monkeypatch.setattr(resolver, "_PARALLEL_RESOLVE", True)
+        calls = []
+
+        def fake_extract(_video_id, clients, _cookiefile=None, **_kwargs):
+            calls.append(clients)
+            raise resolver.BotCheckError("bot")
+
+        with patch("app.resolver._extract_formats", side_effect=fake_extract):
+            with pytest.raises(resolver.BotCheckError):
+                get_stream_url("dQw4w9WgXcQ")
+
+        assert calls == [resolver._TAP_FAST_CLIENTS]
+
+    def test_tap_merges_visionos_formats_with_the_race(self, monkeypatch):
+        monkeypatch.setattr(resolver, "_PARALLEL_RESOLVE", True)
+        now = 1_800_000_000
+        fast = [{"format_id": "251", "url": _FAKE_URL_251_LATE, "available_at": now + 8}]
+        slow = [{"format_id": "251", "url": _FAKE_URL_251_EARLY, "available_at": now + 2}]
+
+        def fake_extract(_video_id, clients, _cookiefile=None, **_kwargs):
+            return fast if clients == resolver._TAP_FAST_CLIENTS else slow
+
+        with patch("app.resolver._extract_formats", side_effect=fake_extract), \
+             patch("time.time", return_value=now), \
+             patch("time.sleep") as sleep:
+            url = get_stream_url("dQw4w9WgXcQ")
+
+        assert url == _FAKE_URL_251_EARLY
+        sleep.assert_called_once()
+        assert sleep.call_args.args[0] == pytest.approx(2.0)
 
 
 class TestGateCache:
@@ -1048,10 +1149,10 @@ class TestPrefetchExtractionPolicy:
                     "dQw4w9WgXcQ", "aac", should_stop=should_stop
                 )
 
-        assert calls == [resolver._FAST_CLIENT_SETS[0]]
+        assert calls == [resolver._PREFETCH_SEQUENTIAL_CLIENT_SETS[0]]
 
-    def test_parallel_prefetch_starts_with_audio_only_client_set(self, monkeypatch):
-        """Parallel mode should win one pass instead of two sequential passes."""
+    def test_parallel_prefetch_starts_with_the_no_js_client(self, monkeypatch):
+        """Parallel mode wins one pass without starting Deno."""
         monkeypatch.setattr(resolver, "_PREFETCH_PARALLEL", True)
         calls = []
 
@@ -1062,9 +1163,9 @@ class TestPrefetchExtractionPolicy:
         with patch("app.resolver._extract_formats", side_effect=fake_extract):
             resolver._resolve_prefetch("dQw4w9WgXcQ", "aac")
 
-        assert calls == [("web_embedded", "default")]
+        assert calls == [resolver._TAP_FAST_CLIENTS]
 
-    def test_sequential_prefetch_keeps_web_first(self, monkeypatch):
+    def test_sequential_prefetch_keeps_the_no_js_client_first(self, monkeypatch):
         monkeypatch.setattr(resolver, "_PREFETCH_PARALLEL", False)
         calls = []
 
@@ -1075,7 +1176,7 @@ class TestPrefetchExtractionPolicy:
         with patch("app.resolver._extract_formats", side_effect=fake_extract):
             resolver._resolve_prefetch("dQw4w9WgXcQ", "aac")
 
-        assert calls == [("web",)]
+        assert calls == [resolver._TAP_FAST_CLIENTS]
 
 
     def test_cancelled_prefetch_does_not_populate_cache(self):

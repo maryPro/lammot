@@ -29,6 +29,9 @@ expired ones are never handed out.
 
 yt-dlp needs a JavaScript runtime (Deno) and the yt-dlp-ejs package for
 YouTube since 2025.11 — install "yt-dlp[default]" and Deno (see README).
+Interactive taps try the visionos client first: it returns already-signed
+audio-only URLs without an n/sig challenge, so the common cold start never
+starts Deno.  The Deno-capable client race is only a fallback.
 """
 
 from __future__ import annotations
@@ -50,6 +53,39 @@ import yt_dlp  # type: ignore
 from app.cache import cache_delete, cache_get, cache_set
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# yt-dlp client capabilities
+# ---------------------------------------------------------------------------
+
+def _enable_cookie_client(clients: dict, name: str) -> bool:
+    """Mark a yt-dlp player client as usable with account cookies.
+
+    yt-dlp drops clients whose ``SUPPORTS_COOKIES`` flag is false when a
+    logged-in cookies file is configured.  The visionos client does not need
+    cookies, but sending them is harmless and keeps its no-JS fast path
+    available in production.  Returns True when the client table was changed.
+    """
+    client = clients.get(name)
+    if not isinstance(client, dict):
+        return False
+    client["SUPPORTS_COOKIES"] = True
+    return True
+
+
+def _enable_visionos_for_authenticated_sessions() -> None:
+    try:
+        from yt_dlp.extractor.youtube._base import INNERTUBE_CLIENTS
+    except Exception:  # pragma: no cover - guarded against yt-dlp layout changes
+        logger.debug("yt-dlp player-client table is unavailable")
+        return
+    if _enable_cookie_client(INNERTUBE_CLIENTS, "visionos"):
+        logger.debug("Enabled visionos for authenticated yt-dlp sessions")
+
+
+_enable_visionos_for_authenticated_sessions()
+
 
 # ---------------------------------------------------------------------------
 # Errors
@@ -108,27 +144,29 @@ _BOT_CHECK_COOLDOWN: float = 60
 _MAX_AVAILABILITY_WAIT: float = 2.0
 
 # Maximum time to wait for a discovered pre-roll gate, after yt-dlp has
-# already returned a format.  This is not a total tap budget: cold yt-dlp +
-# Deno extraction alone takes ~5 s on Railway, so a hard 3 s total deadline
-# made every new track return 502 at 3.0 s.
+# already returned a format.  This is not a total tap budget: a cold Deno
+# fallback can take ~5 s on Railway, so a hard 3 s total deadline made every
+# new track return 502 at 3.0 s.
 _MAX_TAP_GATE_WAIT: float = 3.0
 
-# Hard cap on the parallel extraction phase only.  All client sets race, so
-# the first usable response wins; this cap is just a safety net for a hung
-# client.  Keep it well above the measured ~5 s cold resolve.
+# Hard cap on the fallback client race only.  The no-JS visionos pass normally
+# answers first; the race is a safety net for a hung or gated client.  Keep the
+# cap well above the measured cold fallback resolve.
 _MAX_TAP_EXTRACT_WAIT: float = 12.0
 
-# Resolver client strategy.  The plain web client is tried first: its muxed
-# 360p MP4 (itag 18) is served without a pre-roll gate, so playback starts
-# immediately.  If that pass yields no usable format, we pay for one pass with
-# the embedded/default clients, which expose the audio-only itags 140/251.
+# Resolver client strategy.  A tap first asks the visionos client, which
+# returns already-signed audio-only URLs (itags 251/140) without an n/sig
+# challenge, so yt-dlp never starts Deno for this pass.  Only when that pass has
+# no immediately usable format do we fall back to the client race below.
 _FAST_CLIENTS: Tuple[str, ...] = ("web",)
 _DEFAULT_CLIENTS: Tuple[str, ...] = ("web_embedded", "default")
+_TAP_FAST_CLIENTS: Tuple[str, ...] = ("visionos",)
 
-# Interactive taps race these client sets: the pre-roll gate is assigned per
+# Interactive taps race these client sets as a fallback.  These clients may
+# need the n/sig challenge and Deno, so they are only started when the no-JS
+# pass could not produce a usable format.  The pre-roll gate is assigned per
 # player response, so a differently resolved client often returns an ungated
-# format while the first one is still gated.  Each set is cheap and the race
-# stops as soon as one set yields a usable format.
+# format while the first one is still gated.
 _FAST_CLIENT_SETS: Tuple[Tuple[str, ...], ...] = (
     ("web",),
     ("web_embedded", "default"),
@@ -141,19 +179,33 @@ _PARALLEL_RESOLVE = True
 # third prefetch resolve/extract slot and one slot reserved for a user tap.
 _PREFETCH_PARALLEL = os.getenv("SEARCH_PREFETCH_PARALLEL", "0") == "1"
 
-# Prefetch normally walks the client sets sequentially so it never competes
-# with a tap.  In parallel mode it starts with the set that exposes the
-# audio-only itags: one pass then usually wins instead of two sequential ones.
+# Prefetch tries the no-JS client first in both modes.  In parallel mode it then
+# moves the audio-only embedded/default set ahead of web.
 _PREFETCH_FAST_CLIENT_SETS: Tuple[Tuple[str, ...], ...] = (
+    _TAP_FAST_CLIENTS,
     ("web_embedded", "default"),
     ("web",),
     ("web_embedded",),
 )
+_PREFETCH_SEQUENTIAL_CLIENT_SETS: Tuple[Tuple[str, ...], ...] = (
+    _TAP_FAST_CLIENTS,
+    *_FAST_CLIENT_SETS,
+)
 
 
 def _prefetch_client_sets() -> Tuple[Tuple[str, ...], ...]:
-    """Client-set order for prefetch: one fast pass in parallel mode."""
-    return _PREFETCH_FAST_CLIENT_SETS if _PREFETCH_PARALLEL else _FAST_CLIENT_SETS
+    """Client-set order for prefetch: the no-JS client always goes first."""
+    fast = _tap_fast_clients()
+    sets = (
+        _PREFETCH_FAST_CLIENT_SETS
+        if _PREFETCH_PARALLEL
+        else _PREFETCH_SEQUENTIAL_CLIENT_SETS
+    )
+    if fast == sets[0]:
+        return sets
+    # YTDLP_PLAYER_CLIENTS overrides the first pass; drop the default fast set.
+    return tuple(dict.fromkeys((fast, *sets[1:])))
+
 
 # Muxed 360p MP4 with AAC audio (itag 18).  Used as a gate-free fallback when
 # the audio-only stream is behind a pre-roll.
@@ -245,6 +297,9 @@ _ITAG_ORDER = {
 # YouTube video_id: exactly 11 chars of [A-Za-z0-9_-].  Validating this before
 # building the URL guarantees yt-dlp only ever receives a YouTube watch URL.
 _VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+# Format ids can carry an audio-track suffix (e.g. visionos returns 251-0,
+# 251-1 for multi-track videos).  The leading digits are the itag.
+_ITAG_PREFIX_RE = re.compile(r"^(\d+)")
 
 # Only these headers from yt-dlp are forwarded to the CDN by the audio relay
 _FORWARDED_HEADERS = ("User-Agent", "Accept", "Accept-Language", "Origin", "Referer")
@@ -397,6 +452,13 @@ def _configured_clients() -> Tuple[str, ...]:
     return _FAST_CLIENTS
 
 
+def _tap_fast_clients() -> Tuple[str, ...]:
+    """First tap pass; YTDLP_PLAYER_CLIENTS is the operational override."""
+    if os.getenv("YTDLP_PLAYER_CLIENTS", "").strip():
+        return _configured_clients()
+    return _TAP_FAST_CLIENTS
+
+
 def _fallback_clients() -> Tuple[str, ...]:
     """Clients used only when the first pass yields no immediately usable format."""
     return _DEFAULT_CLIENTS
@@ -531,14 +593,18 @@ def _pick_format(formats: list[dict], order: Tuple[int, ...] = _ITAG_ORDER["opus
     is not always usable first.  Prefer the earliest-available duplicate within
     the requested itag order.
 
+    Format ids with an audio-track suffix (``251-0``) are matched by their
+    leading itag so multi-track videos keep the same priority.
+
     Returns the first format from *order* (itags) that has a ``url``, or
     None if none of them is present.
     """
     by_itag: dict[int, list[dict]] = {}
     for fmt in formats:
         format_id = str(fmt.get("format_id") or "")
-        if format_id.isdigit() and fmt.get("url"):
-            by_itag.setdefault(int(format_id), []).append(fmt)
+        match = _ITAG_PREFIX_RE.match(format_id)
+        if match and fmt.get("url"):
+            by_itag.setdefault(int(match.group(1)), []).append(fmt)
 
     for itag in order:
         candidates = by_itag.get(itag)
@@ -665,6 +731,13 @@ def _usable_now(fmt: Optional[dict]) -> bool:
     return fmt is not None and _gate_wait(fmt) <= _MAX_AVAILABILITY_WAIT
 
 
+def _stream_url_and_headers(fmt: dict) -> Tuple[str, Dict[str, str]]:
+    """Return the playable CDN URL and only the headers the relay forwards."""
+    raw_headers = fmt.get("http_headers") or {}
+    headers = {k: str(v) for k, v in raw_headers.items() if k in _FORWARDED_HEADERS}
+    return fmt["url"], headers or dict(_DEFAULT_HEADERS)
+
+
 def _resolve_serial(
     video_id: str,
     prefer: str = "opus",
@@ -750,9 +823,7 @@ def _resolve_serial(
 
     _wait_until_available(fmt)
 
-    raw_headers = fmt.get("http_headers") or {}
-    headers = {k: str(v) for k, v in raw_headers.items() if k in _FORWARDED_HEADERS}
-    return fmt["url"], headers or dict(_DEFAULT_HEADERS)
+    return _stream_url_and_headers(fmt)
 
 
 def _pick_resolver_error(errors: list[ResolverError]) -> ResolverError:
@@ -774,6 +845,9 @@ def _resolve_parallel(
     prefer: str = "opus",
     cookiefile: Optional[str] = None,
     max_gate_wait: float = _MAX_TAP_GATE_WAIT,
+    *,
+    initial_formats: Optional[list[dict]] = None,
+    deadline: Optional[float] = None,
 ) -> Tuple[str, Dict[str, str]]:
     """
     Race several client sets and return the first ungated format.
@@ -783,10 +857,17 @@ def _resolve_parallel(
     gated.  We start every set at once and stop as soon as one yields a usable
     format; if every set is gated, we merge their formats and wait for the
     earliest gate, but never longer than *max_gate_wait*.
+
+    *initial_formats* are formats from an earlier cheap pass (the no-JS
+    visionos client).  They are merged so an already-gated duplicate can still
+    win, and *deadline* shares the tap's total extraction budget with that
+    earlier pass.
     """
     started = time.perf_counter()
-    extract_deadline = started + _MAX_TAP_EXTRACT_WAIT
-    formats: list[dict] = []
+    extract_deadline = (
+        deadline if deadline is not None else started + _MAX_TAP_EXTRACT_WAIT
+    )
+    formats: list[dict] = list(initial_formats or [])
     errors: list[ResolverError] = []
     best: Optional[tuple[dict, str]] = None
     extract_calls = 0
@@ -870,9 +951,71 @@ def _resolve_parallel(
 
     _wait_until_available(fmt, max_gate_wait)
 
-    raw_headers = fmt.get("http_headers") or {}
-    headers = {k: str(v) for k, v in raw_headers.items() if k in _FORWARDED_HEADERS}
-    return fmt["url"], headers or dict(_DEFAULT_HEADERS)
+    return _stream_url_and_headers(fmt)
+
+
+def _resolve_tap(
+    video_id: str,
+    prefer: str = "opus",
+    cookiefile: Optional[str] = None,
+    max_gate_wait: float = _MAX_TAP_GATE_WAIT,
+) -> Tuple[str, Dict[str, str]]:
+    """
+    Resolve an interactive tap with the cheapest client first.
+
+    The visionos client returns already-signed audio-only URLs without an
+    n/sig challenge, so this pass does not start Deno.  When it has no format
+    usable within ``_MAX_AVAILABILITY_WAIT``, fall back to the client race and
+    merge both result sets so a gated visionos duplicate can still win.
+    """
+    started = time.perf_counter()
+    deadline = started + _MAX_TAP_EXTRACT_WAIT
+    fast_formats: list[dict] = []
+    fast_clients = _tap_fast_clients()
+
+    try:
+        fast_formats = _extract_formats(video_id, fast_clients, cookiefile)
+    except (BotCheckError, VideoUnavailableError):
+        # IP/account or video-wide: another client cannot fix it.
+        raise
+    except (FormatUnavailableError, TransientResolveError) as exc:
+        logger.info(
+            "Resolver: %s fast clients=%s failed (%s), trying the race",
+            video_id,
+            ",".join(fast_clients),
+            type(exc).__name__,
+        )
+    else:
+        fmt = _select_format(fast_formats, prefer)
+        if _usable_now(fmt):
+            logger.info(
+                "Resolver: %s outcome=%s clients=fast(%s) passes=1 "
+                "extract_ms=%.0f gate_ms=%.0f itag=%s",
+                video_id,
+                "ready",
+                ",".join(fast_clients),
+                (time.perf_counter() - started) * 1000,
+                _gate_wait(fmt) * 1000,
+                fmt.get("format_id"),
+            )
+            _wait_until_available(fmt, max_gate_wait)
+            return _stream_url_and_headers(fmt)
+        elif fmt is not None:
+            logger.info(
+                "Resolver: %s fast clients=%s gated %.0f ms, trying the race",
+                video_id,
+                ",".join(fast_clients),
+                _gate_wait(fmt) * 1000,
+            )
+
+    return _resolve_parallel(
+        video_id,
+        prefer,
+        cookiefile,
+        max_gate_wait,
+        initial_formats=fast_formats,
+        deadline=deadline,
+    )
 
 
 def _resolve_prefetch(
@@ -950,9 +1093,7 @@ def _resolve_prefetch(
     _wait_until_available(fmt, max_gate_wait)
     _raise_if_stopped(should_stop)
 
-    raw_headers = fmt.get("http_headers") or {}
-    headers = {k: str(v) for k, v in raw_headers.items() if k in _FORWARDED_HEADERS}
-    return fmt["url"], headers or dict(_DEFAULT_HEADERS)
+    return _stream_url_and_headers(fmt)
 
 
 def _resolve_via_ytdlp(
@@ -970,7 +1111,7 @@ def _resolve_via_ytdlp(
             video_id, prefer, cookiefile, should_stop, max_gate_wait
         )
     if parallel and _PARALLEL_RESOLVE:
-        return _resolve_parallel(video_id, prefer, cookiefile, max_gate_wait)
+        return _resolve_tap(video_id, prefer, cookiefile, max_gate_wait)
     return _resolve_serial(video_id, prefer, cookiefile)
 
 
