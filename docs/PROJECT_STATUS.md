@@ -21,7 +21,7 @@ Maintained by: Project Manager / Architect
 
 | Task | Owner | State | Next step | Updated |
 |---|---|---|---|---|
-| Search-prefetch latency and log-hygiene fix (`PREFETCH-001`, `PREFETCH-002`) | Developer (fix-prefetch worktree) | Implemented, tests green; pending review/merge | Review the PR, deploy, and run the production verification window | 2026-11-20 |
+| Search-prefetch latency and log-hygiene fix (`PREFETCH-001`, `PREFETCH-002`) | Developer (fix-prefetch worktree) | Follow-up implemented, tests green; pending deploy/verification | Deploy and repeat the production-timing check | 2026-11-20 |
 
 ## Known bugs
 
@@ -48,6 +48,7 @@ Maintained by: Project Manager / Architect
 | 2026-11-17 | iOS uses AAC; track metadata duration is authoritative; doubled media duration is ignored and a forced track end is used | Old iOS webviews cannot play WebM/Opus reliably and some report roughly doubled duration | `frontend/audio-format.js`, `frontend/player-time.js`, PR #20–#21 |
 | Current | Audio is relayed through the server; audio files are not stored | googlevideo URLs only work from the resolving IP, and the server must not store media | `app/main.py` `/audio`, `ARCHITECTURE.md` section 1 |
 | 2026-11-20 | Implementation work stays off `main` and follows the documented TDD cycle | Keep `main` deployable and prove every fix with a regression test | `AGENTS.md`, PR #22 |
+| 2026-11-20 | Prefetch settle is interruptible and defaults to 1 s; a background prefetch does not wait for a per-key lock already held by a tap | Production logs showed the final track's prefetch 3.4 s behind a stale job while the tap cold-resolved for 4.3 s | `app/prefetch.py`, `app/resolver.py`, Railway logs 17:54 |
 
 ## Recently completed
 

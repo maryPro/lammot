@@ -1152,8 +1152,21 @@ def get_stream_url(
         # A prefetch waits for the guard before it takes a resolve slot, so it
         # can never occupy the slot a tap would use.
         if prefetch and not dedicated:
+            _raise_if_stopped(should_stop)
             stack.enter_context(_PREFETCH_GUARD)
-        stack.enter_context(_resolve_lock(key))
+
+        lock = _resolve_lock(key)
+        if prefetch and should_stop is not None:
+            # Background prefetch: never pin the single worker behind a tap or
+            # a browser ?prefetch=1 request that already resolves this key.
+            _raise_if_stopped(should_stop)
+            if not lock.acquire(blocking=False):
+                raise PrefetchCancelled(
+                    "another request is already resolving this key"
+                )
+            stack.callback(lock.release)
+        else:
+            stack.enter_context(lock)
 
         if not force:
             negative = cache_get(_negative_key(key))
@@ -1169,9 +1182,11 @@ def get_stream_url(
                 raise BotCheckError("YouTube bot check is active; resolver paused")
 
         logger.info("Resolver: cache miss — resolving via yt-dlp for %s", key)
+        _raise_if_stopped(should_stop)
         semaphore = _CANARY_SEMAPHORE if dedicated else _RESOLVE_SEMAPHORE
         stack.enter_context(semaphore)
         _pace_resolve()
+        _raise_if_stopped(should_stop)
         try:
             stream_url, headers, _account = _resolve_with_accounts(
                 video_id,
