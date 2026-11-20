@@ -3,7 +3,7 @@
 **Telegram Mini App | Language: English**
 Version: 1.3
 
-Last verified against: `f181d9d` (PR #34, 2026-11-21) (2026-11-21)
+Last verified against: `f181d9d` (PR #34, 2026-11-21)
 Project status: [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)
 
 ---
@@ -488,11 +488,25 @@ navigator.mediaSession.setActionHandler('seekto', (details) => {
   }
 });
 
+navigator.mediaSession.setPositionState(
+  positionState(playbackDuration(), audio.currentTime, audio.playbackRate)
+);
+
 navigator.mediaSession.playbackState = playing ? 'playing' : 'paused';
 ```
 
-Artwork uses `544x544` and `seekto` is handled. Position synchronization via
-`navigator.mediaSession.setPositionState` is **not currently implemented**.
+Artwork uses `544x544` and `seekto` is handled. Handlers are (re)registered
+from the `playing` event: iOS ignores `nexttrack`/`previoustrack` handlers that
+were registered before the media session became active and shows its own
+±10 s seek buttons otherwise. `seekbackward`/`seekforward` are intentionally
+not registered, because iOS displays either those or previous/next, not both.
+
+The lock-screen timeline comes from `setPositionState`, which uses the
+metadata-derived `playbackDuration()` — never raw `audio.duration`, because
+iOS reports roughly doubled duration for the AAC relay. Without it the system
+widget shows about twice the real track length. Position is re-synced on
+`timeupdate` (throttled), `pause`, `seeked`, `loadedmetadata`, and
+`durationchange`, and reset to zero at the start of each track.
 
 ---
 
