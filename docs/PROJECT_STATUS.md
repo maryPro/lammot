@@ -1,7 +1,7 @@
 # Lammot — Project Status
 
 Last updated: 2026-11-20
-Verified against: `fix-prefetch-2-0 @ ca71e5a`
+Verified against: `PR #27` (2026-11-20)
 Maintained by: Project Manager / Architect
 
 > Read this first for current state. Use [ARCHITECTURE.md](../ARCHITECTURE.md)
@@ -11,16 +11,16 @@ Maintained by: Project Manager / Architect
 
 ## Current focus
 
-- Search prefetch 2.0: explicit Enter submission and no live search results.
-  Typing must not call `/api/search` or start prefetch; only an explicit submit
-  does.
+- Verify `PREFETCH-001`/`PREFETCH-002` in production after deploy: check
+  `api_stream resolve_ms` and `audio_relay first_chunk_ms`.
+- Search is now explicit-submit only: typing no longer calls `/api/search` or
+  starts prefetch.
 
 ## In progress
 
 | Task | Owner | State | Next step | Updated |
 |---|---|---|---|---|
 | Search-prefetch latency and log-hygiene fix (`PREFETCH-001`, `PREFETCH-002`) | Developer (fix-prefetch worktree) | Follow-up implemented, tests green; pending deploy/verification | Deploy and repeat the production-timing check | 2026-11-20 |
-| Search prefetch 2.0 — explicit-submit-only search (`PREFETCH-003`) | Developer (fix-prefetch-2-0 worktree) | Implemented with red/green tests; docs updated; pending manual verification and merge | Manually verify no request/results while typing, then open PR and squash-merge | 2026-11-20 |
 
 ## Known bugs
 
@@ -28,7 +28,6 @@ Maintained by: Project Manager / Architect
 |---|---|---|---|---|---|---|
 | PREFETCH-001 | High | After a search, waiting several seconds and tapping the top result can still take ~4–11 s to start audio. The final query’s prefetch can be blocked behind a stale in-flight job, and a tap can then wait for a cold resolve that competes with background extraction for slots. | Search prefetch / resolver | Use `SEARCH_PREFETCH_ENABLED=0` as an operational fallback if prefetch makes latency worse; otherwise retry | Add a settle window; give prefetch its own 1-slot sequential extraction path; add correlation/timing logs and regression tests; verify production `api_stream resolve_ms` and `audio_relay first_chunk_ms` | 2026-11-20 |
 | PREFETCH-002 | Medium | Parallel yt-dlp extractions can truncate or rewrite the shared cookies file, producing `does not look like a Netscape format cookies file` and risking permanent cookie corruption. | Resolver / cookies | Re-upload cookies with `/cookies` if errors persist | Make extraction read-only for cookies; keep `/cookies` as the only atomic writer; add a test | 2026-11-20 |
-| PREFETCH-003 | Medium | Search results and prefetch start on every debounced keystroke; intermediate queries can enqueue unnecessary prefetch work and the final query can start behind them. | Search UX / prefetch | Wait for the final results; retry if a track is slow | Require explicit Enter submit; hide results and prefetch until submit; update UI spec | 2026-11-20 |
 
 ## Known limitations / tech debt
 
@@ -49,6 +48,7 @@ Maintained by: Project Manager / Architect
 | Current | Audio is relayed through the server; audio files are not stored | googlevideo URLs only work from the resolving IP, and the server must not store media | `app/main.py` `/audio`, `ARCHITECTURE.md` section 1 |
 | 2026-11-20 | Implementation work stays off `main` and follows the documented TDD cycle | Keep `main` deployable and prove every fix with a regression test | `AGENTS.md`, PR #22 |
 | 2026-11-20 | Prefetch settle is interruptible and defaults to 1 s; a background prefetch does not wait for a per-key lock already held by a tap | Production logs showed the final track's prefetch 3.4 s behind a stale job while the tap cold-resolved for 4.3 s | `app/prefetch.py`, `app/resolver.py`, Railway logs 17:54 |
+| 2026-11-20 | Search is explicit-submit only; typing does not call `/api/search` or start prefetch | Intermediate keystroke queries enqueued unnecessary prefetch work and could delay the final query | `frontend/search-query.js`, `frontend/app.js`, PR #27 |
 
 ## Recently completed
 
@@ -59,11 +59,10 @@ Maintained by: Project Manager / Architect
 | 2026-11-17 | iOS track duration from metadata is authoritative | `5f3f392` (#20) |
 | 2026-11-17 | Ignore doubled iOS media duration and end tracks on time | `f2e5d4f` (#21) |
 | 2026-11-20 | Multi-agent workflow and TDD rules in `AGENTS.md` | `1056314` (#22) |
+| 2026-11-20 | Explicit-submit search: no search or prefetch while typing | PR #27 |
 
 ## Next up
 
-- Manually verify `PREFETCH-003` (no `/api/search` while typing) and squash-merge
-  the explicit-submit search change; then move it to **Recently completed**.
 - Fix `PREFETCH-001`: stale in-flight prefetch and extraction-slot contention.
 - Fix `PREFETCH-002`: concurrent cookie writes during yt-dlp extraction.
 - Reduce log noise: expected INFO must not appear as Railway `[err]`.

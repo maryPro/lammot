@@ -3,7 +3,7 @@
 **Telegram Mini App | Language: English**
 Version: 1.2
 
-Last verified against: `fix-prefetch-2-0 @ ca71e5a` (2026-11-20)
+Last verified against: `PR #27` (2026-11-20)
 Project status: [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)
 
 ---
