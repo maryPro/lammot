@@ -1,67 +1,73 @@
-# AGENTS.md — правила работы ИИ-агентов в Lammot
+# AGENTS.md — AI Agent Workflow & Rules for Lammot
 
-Этот файл обязателен к прочтению перед любой правкой. Подробный процесс —
-в [docs/bugfix-workflow.md](docs/bugfix-workflow.md).
+This file is mandatory reading before making any changes or plans. For detailed bugfix procedures, see [docs/bugfix-workflow.md](docs/bugfix-workflow.md).
 
-## Проект
+## Project Overview
 
-Lammot — Telegram Mini App: музыкальный плеер.
+Lammot is a Telegram Mini App music player.
 
-- Backend: Python 3.12, FastAPI, SQLite (`aiosqlite`), `ytmusicapi`, `yt-dlp`.
-- Frontend: `frontend/index.html`, `frontend/style.css`, `frontend/app.js`
-  (без фреймворков).
-- Точка входа: `app/main.py`. Архитектура: `ARCHITECTURE.md`.
-- Деплой: Docker на Railway из ветки `main`.
+- **Backend:** Python 3.12, FastAPI, SQLite (`aiosqlite`), `ytmusicapi`, `yt-dlp`.
+- **Frontend:** `frontend/index.html`, `frontend/style.css`, `frontend/app.js` (vanilla JS, no frameworks).
+- **Entry Point:** `app/main.py`. Architecture: `ARCHITECTURE.md`. UI Spec: `UI_SPEC.md`.
+- **Deployment:** Docker on Railway auto-deployed from `main`.
 
-## Команды
+## Commands
 
-- Тесты без сети:
+- **Unit/non-network tests:**
   `python -m pytest -m "not integration" -v`
-  Если в worktree нет своего `venv`:
+  *(If the isolated worktree lacks its own `venv`, run via the main environment):*
   `/Users/mariia/lammot-main/venv/bin/python -m pytest -m "not integration" -v`
-- Интеграционные тесты (реальный YouTube):
-  `python -m pytest -m integration -v` — только по явному запросу.
-- JS-тесты (встроенный Node test runner, без npm):
+- **Integration tests (real YouTube requests — run ONLY when explicitly requested):**
+  `python -m pytest -m integration -v`
+- **Frontend JS tests (built-in Node test runner, no npm):**
   `node --test tests/js/player-time.test.js`
-- Локальный запуск:
+- **Local server run (requires activated `venv`):**
   `uvicorn app.main:app --env-file .env --port 8000 --reload`
-  (нужен активированный `venv`).
 
-## Жёсткие правила
+## Multi-Agent Roles & Workflow
 
-1. `main` — только чтение. Никаких коммитов, push, merge, rebase и
-   force-push в `main`.
-2. Работай только в выданной ветке и worktree. Не переключай ветки.
-3. Не выходи за список разрешённых файлов. Нужно больше — остановись и
-   спроси разрешение.
-4. Запрещены: рефакторинг, переименования, массовое форматирование,
-   «заодно улучшил» и смена стиля в чужих файлах.
-5. Не меняй зависимости (`requirements*.txt`), схему БД (`app/database.py`)
-   и публичные API-контракты без отдельного разрешения.
-6. Не коммить `.env`, `*.db`, `venv/`, `cookies*.txt`, секреты и токены.
-7. Один баг — один чат. Не тащи в текущую ветку другие задачи.
+### 1. Project Manager & Architect (`Plan` / `Ask` Mode — in `local main`)
+- **Read & Plan Only:** Never modify application code (`app/`, `frontend/`, `tests/`). Only read files, check Git status/history, update documentation (`ARCHITECTURE.md`, `UI_SPEC.md`), and save step-by-step feature plans in `.kilo/plans/<feature-name>.md`.
+- **GitHub Sync:** Whenever the user says "Sync", "What's new?", or starts planning a new feature, run `git fetch`, `git pull origin main`, and `git log -n 5 --oneline` in the terminal to stay aligned with GitHub.
+- **Communication Style:** Explain everything in plain, clear language without unnecessary jargon. When explaining how the project or a feature works, always structure the response in two parts:
+  1. **User Perspective:** How it behaves and impacts the end user.
+  2. **Technical Perspective:** Which modules, files, functions, and database tables are involved.
 
-## Обязательный цикл
+### 2. Bug Detective (`Debug` Mode — in an isolated Git worktree)
+- Work strictly inside an isolated Git worktree created for a single bug.
+- Do not guess fixes blindly. Inspect logs, trace execution paths, test hypotheses, and pinpoint the exact root cause (file, function, and line number) before switching to `Code` mode.
 
-1. Сначала регрессионный тест, воспроизводящий баг (он должен падать).
-2. Минимальный фикс.
-3. Полный прогон `pytest -m "not integration" -v` — всё зелёное.
-4. Отчёт: изменённые файлы, `git diff --stat main...HEAD`, результат
-   тестов, что не сделано и почему.
+### 3. Developer (`Code` Mode — in an isolated Git worktree)
+- Work strictly inside an isolated Git worktree. Never edit code directly on `main`.
+- Follow the mandatory TDD cycle below before finishing any task.
+
+## Strict Guardrails
+
+1. `main` is read-only for implementation. No commits, pushes, merges, rebases, or force-pushes directly into `main`.
+2. Work strictly in your assigned branch and worktree. Do not switch branches.
+3. Stay strictly within the approved file scope. If additional files must be touched, stop and ask for permission first.
+4. Forbidden: unrelated refactoring, renaming, mass formatting, "drive-by improvements", or altering code style in untouched files.
+5. Do not modify dependencies (`requirements*.txt`), database schema (`app/database.py`), or public API contracts without explicit approval.
+6. Never commit `.env`, `*.db`, `venv/`, `cookies*.txt`, secrets, or tokens.
+7. One bug or one feature = one isolated chat/worktree. Do not mix unrelated tasks in the same branch.
+
+## Mandatory TDD Cycle (`Code` Mode)
+
+1. **Red:** Write a regression/feature test first (reproducing the bug or testing the new requirement). Run it and confirm it fails.
+2. **Green:** Implement the minimal clean fix/feature to make the test pass.
+3. **Regression:** Run the full non-integration suite (`/Users/mariia/lammot-main/venv/bin/python -m pytest -m "not integration" -v` and `node --test tests/js/player-time.test.js` if frontend was touched) and confirm 100% green.
+4. **Report:** Provide a clear summary listing modified files, `git diff --stat main...HEAD`, test results, and anything left undone (with reasons).
 
 ## Definition of Done
 
-- регрессионный тест падал до фикса и проходит после;
-- все не-интеграционные тесты зелёные;
-- дифф ограничен разрешёнными файлами;
-- ручная проверка сценария выполнена человеком;
-- PR создан, CI зелёный, выполнен squash merge.
+- Regression/feature test failed before the fix and passes after.
+- All non-integration Python and JS tests are green.
+- Diff is strictly limited to approved files.
+- Manual verification of the user scenario is completed by the user.
+- Pull Request is created, CI checks pass, and changes are merged via **Squash and merge**.
 
-## Безопасность
+## Security & Environment
 
-- Локальный `.env` должен содержать токен **тестового** бота. Прод-токен
-  хранится только в Railway Variables.
-- У бота один вебхук: не запускай локально прод-бота одновременно с
-  Railway.
-- `PUBLIC_URL` меняется при перезапуске `cloudflared`/`ngrok` — после
-  смены обнови `.env` и перезапусти uvicorn.
+- Local `.env` must contain the **test** bot token only. The production token lives exclusively in Railway Variables.
+- The bot uses a single webhook: never run the production bot locally at the same time as Railway.
+- `PUBLIC_URL` changes whenever `cloudflared`/`ngrok` restarts — update `.env` and restart `uvicorn` after each tunnel restart.
