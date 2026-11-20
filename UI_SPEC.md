@@ -1,7 +1,10 @@
 # LammotBot — UI Specification
 
 **Telegram Mini App | Language: English**
-Version: 1.0
+Version: 1.1
+
+Last verified against: `main @ 1056314` (2026-11-20)
+Project status: [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)
 
 ---
 
@@ -12,29 +15,36 @@ Version: 1.0
 #### Light Theme (default)
 ```css
 --bg-primary: #FFFFFF;
+--bg-primary-rgb: 255, 255, 255;
 --bg-secondary: #F5F5F5;
 --bg-card: #FFFFFF;
 --text-primary: #111111;
 --text-secondary: #666666;
 --border: #E0E0E0;
---shadow: rgba(0,0,0,0.08);
+--shadow: rgba(0, 0, 0, 0.08);
+--danger: #D92D20;
 ```
 
 #### Dark Theme
 ```css
 --bg-primary: #121212;
+--bg-primary-rgb: 18, 18, 18;
 --bg-secondary: #1E1E1E;
 --bg-card: #242424;
 --text-primary: #FFFFFF;
 --text-secondary: #AAAAAA;
 --border: #333333;
---shadow: rgba(0,0,0,0.4);
+--shadow: rgba(0, 0, 0, 0.4);
+--danger: #FF6B5E;
 ```
 
 #### Accent Colors (15 options, user-selectable)
 ```css
 /* Default */
 --accent: #BC13FE;  /* 1. Cyberpunk Purple ★ default */
+--on-accent: #FFFFFF;
+--accent-soft: rgba(188, 19, 254, 0.12);
+--accent-glow: rgba(188, 19, 254, 0.45);
 
 /* Full palette */
 /* 1  */ #BC13FE  /* Cyberpunk Purple */
@@ -54,6 +64,11 @@ Version: 1.0
 /* 15 */ #C0C0C0  /* Silver */
 ```
 
+The accent is user-selectable in Settings. When it changes, `app.js` sets
+`--accent`, `--accent-soft`, and `--accent-glow`. `--on-accent` is chosen from
+the accent's relative luminance: dark text on light accents such as Gold,
+Silver, and Matrix Green, white text on dark accents.
+
 ### Typography
 ```css
 --font: -apple-system, 'SF Pro Display', 'Roboto', sans-serif;
@@ -64,7 +79,7 @@ Version: 1.0
 --font-weight-normal: 400;
 ```
 
-### Spacing & Radius
+### Spacing, Radius, Layout
 ```css
 --radius-card: 12px;
 --radius-pill: 999px;
@@ -72,246 +87,363 @@ Version: 1.0
 --spacing-sm: 8px;
 --spacing-md: 16px;
 --spacing-lg: 24px;
+
+--tabbar-h: 58px;
+--mini-h: 64px;
+--safe-bottom: max(env(safe-area-inset-bottom, 0px),
+                   var(--tg-safe-area-inset-bottom, 0px));
+--wallpaper-overlay: 0.88;  /* 0.80 in dark theme */
 ```
 
 ---
 
 ## 2. Screen Layouts
 
-### 2.1 Main Screen
+### 2.1 Main Screen and Search
 
 ```
 ┌─────────────────────────┐
-│  🔍 Search music...     │  ← search input, full width, rounded
-│  ───────────────────    │  ← divider line
-│  Recent Searches        │  ← section label (always visible)
-│   • Zemfira             │  ← last 10 queries, tappable
-│   • Imagine Dragons     │
-│   • Nirvana             │
-│   • ...                 │
+│  🔍 Search music…       │  ← 44px round search pill
+│─────────────────────────│
+│  Recent searches        │
+│   🕘 Zemfira            │  ← up to 10 unique queries
+│   🕘 Imagine Dragons    │
 │                         │
-│                         │
-│  [mini-player]          │  ← appears here ONLY when music is playing
+│  [mini-player]          │  ← once a track is loaded
 │─────────────────────────│
-│  ⚙️         ⭐       👤 │  ← bottom bar: Settings | Favorites | Profile
+│  ⚙️         ⭐       👤 │  ← Settings | Favorites | Profile
 └─────────────────────────┘
 ```
 
-**Bottom bar icons:**
-- `⚙️` Settings — left
-- `⭐` Favorites — center (primary action)
-- `👤` Profile — right
+- The search field is a 44 px pill.
+- Search starts at 2 characters, with a 300 ms debounce.
+- Up to 20 results are requested (`limit=20`); the API cap is 25.
+- Recent searches show up to 10 unique queries, newest first.
+- With no recent searches, the home screen shows an empty-state message
+  inviting the user to search.
+- The mini-player appears once a track is loaded and remains visible while
+  paused or loading, not only while audio is actively playing.
+- The clear button appears only when the field is not empty.
 
-### 2.2 Search Results (while typing)
+### 2.2 Search Results and Track Card
 
 ```
 ┌─────────────────────────┐
-│  🔍 Zemfira          ✕  │  ← clear button appears
+│  🔍 Zemfira          ×  │
 │─────────────────────────│
-│ [thumbnail] Title    [+]│  ← [+] add to Favorites
-│             Artist      │
-│             3:45        │
+│ [thumb] Title       [+] │  ← favorite button
+│         Artist      ⋯   │  ← more actions
+│         3:45            │
 │─────────────────────────│
-│ [thumbnail] Title    [✓]│  ← [✓] already in Favorites, no [+]
-│             Artist      │
-│─────────────────────────│
-│ [thumbnail] Title    [+]│
-│ ...                     │
-│─────────────────────────│
-│ 🎵 Now Playing     ⏯ ⏭ │  ← mini-player (if active)
-│─────────────────────────│
-│  ⚙️         ⭐       👤 │
+│ [thumb] Title       [✓] │  ← already in Favorites
+│         Artist      ⋯   │
 └─────────────────────────┘
 ```
 
-**Track card:**
-- Thumbnail: 48×48px, rounded 8px
-- Title: 14px bold, truncated at 1 line
-- Artist: 12px secondary color
-- Duration: 12px secondary color, right-aligned
-- `[+]` button: accent color, 32×32px circle
-- `[✓]` button: greyed out, same size, no action
+Track card:
 
-### 2.3 Favorites Screen (tap ⭐)
+- Thumbnail: 48×48 px, rounded 8 px; a music note placeholder if the image fails.
+- Title: 14 px bold, one line, truncated.
+- Artist: 12 px secondary color, one line, truncated.
+- Duration: 12 px secondary color, tabular numerals, right-aligned when known.
+- The row itself starts playback.
+- Search and shared-playlist rows show the favorite button: `+` to add, `✓`
+  (checked, greyed) when already saved.
+- The `⋯` more-actions button opens a sheet:
+  - **Play next** — only when a track is already loaded.
+  - **Add to playlist** — opens the playlist picker, including “New playlist…”.
+  - **Add to Favorites** or **Remove from Favorites** — reflects current state.
+  - **Remove from this playlist** — only in the playlist screen, marked danger.
+- The currently playing row gets an accent ring around its thumbnail.
+
+### 2.3 Favorites Screen
 
 ```
 ┌─────────────────────────┐
-│ ←  My Favorites         │  ← back arrow + title
-│  🔍 Search in playlist  │  ← search within favorites
+│ ←  My Favorites         │
+│  🔍 Search in Favorites │
 │─────────────────────────│
-│ [thumbnail] Title       │  ← no [+] button (already in favorites)
-│             Artist      │
-│             3:45        │
+│ [thumb] Title       ⋯   │
+│         Artist          │
+│         3:45            │
 │─────────────────────────│
-│ [thumbnail] Title       │
-│ ...                     │
-│─────────────────────────│
-│ 🎵 Now Playing     ⏯ ⏭ │
-│─────────────────────────│
-│  ⚙️         ⭐       👤 │
+│  No favorites yet       │  ← empty state
 └─────────────────────────┘
 ```
 
-**Playback behavior:** Tracks play in saved order. No radio. When last track ends → stops.
+- Tracks are ordered **newest first**.
+- “Search in Favorites” filters by title and artist.
+- Rows have no favorite button (the track is already saved), but keep the `⋯`
+  menu.
+- Playback uses list mode: next track in the filtered list, no radio, and it
+  stops after the last track.
+- Empty state: “No favorites yet — Tap + next to a song in search to save it
+  here.”
+- A filter with no matches shows “No songs match your search.”
 
-### 2.4 Mini-Player
+### 2.4 Playlist Screen
 
-Appears above the bottom bar when a track is playing. Height: 64px.
+```
+┌─────────────────────────┐
+│ ←  Playlist Name   ⋯    │
+│    12 songs             │
+│─────────────────────────│
+│  [▶ Play]   [Share]     │
+│─────────────────────────│
+│ [thumb] Title       ⋯   │
+│         Artist          │
+└─────────────────────────┘
+```
+
+- Header: back button, playlist name, track count (`1 song` / `N songs`).
+- **Play** button starts list mode from the first track; disabled when empty.
+- **Share** button opens Telegram's share sheet with the server-provided link.
+- `⋯` menu: **Share** and **Delete playlist** (danger).
+- Empty state: “This playlist is empty. Find a song in search, tap ⋯ and choose
+  ‘Add to playlist’.”
+- Track `⋯` menu adds **Remove from this playlist**.
+- Deleting asks for confirmation and warns that the share link will stop
+  working.
+
+### 2.5 Shared Playlist Screen (read-only)
+
+```
+┌─────────────────────────┐
+│ ←  Playlist Name        │
+│    Shared playlist      │
+│─────────────────────────│
+│  [▶ Play]               │
+│─────────────────────────│
+│ [thumb] Title       [+] │
+│         Artist      ⋯   │
+└─────────────────────────┘
+```
+
+- Opened from `start_param=playlist_<token>` or the `playlist` query parameter.
+- The header shows the playlist name with the subtitle “Shared playlist”;
+  before loading, the title is “Shared playlist”.
+- Only **Play** is available. There is no share, delete, or playlist menu.
+- Track rows keep the favorite button and `⋯` menu; there is no “Remove from
+  this playlist” action.
+- Empty state: “This playlist is empty.”
+
+### 2.6 Mini-Player
+
+Appears above the bottom bar once a track is loaded. Height: `--mini-h` (64 px).
 
 ```
 ┌─────────────────────────┐
 │ [thumb] Title  ⏮  ⏯  ⏭ │
 │         Artist          │
-│ ━━━━━━━━━━━━━━━━━━━━    │  ← thin progress bar (2px), accent color
+│ ━━━━━━━━━━━━━━━━━━━━    │  ← 2px progress bar, accent color
 └─────────────────────────┘
 ```
 
-- Tap anywhere on mini-player (except buttons) → opens Full-Screen Player
-- Thumbnail: 40×40px, rounded 6px
+- Tap the info area → opens the Full-Screen Player.
+- Controls: previous, play/pause, next.
+- Play/pause icon reflects the player state; the play button is dimmed while
+  loading.
+- Thumbnail: 40×40 px, rounded 6 px.
 
-### 2.5 Full-Screen Player (tap mini-player)
+### 2.7 Full-Screen Player
 
 ```
 ┌─────────────────────────┐
-│  ↓  (swipe down or ✕)  │  ← close button top right
-│                         │
+│            ⌄            │  ← chevron close, or swipe down
 │  ┌─────────────────┐    │
-│  │                 │    │
-│  │    Artwork      │    │  ← album cover, square, 240×240px, rounded 16px
-│  │                 │    │
+│  │    Artwork      │    │  ← 240×240, rounded 16px
 │  └─────────────────┘    │
-│                         │
-│  Title                  │  ← 18px bold
-│  Artist                 │  ← 14px secondary
-│                         │
-│  ━━━━━━●────────────    │  ← progress bar / timeline, draggable
-│  1:23              3:45 │  ← elapsed / total
-│                         │
-│      ⏮    ⏯    ⏭       │  ← playback controls
-│                         │
+│  Title                  │
+│  Artist                 │
+│  ━━━━━━●────────────    │  ← draggable range input
+│  1:23              3:45 │
+│      ⏮    ⏯    ⏭       │
 │─────────────────────────│
-│  Up Next                │  ← queue section
-│  1. Next Track       ✕  │
-│  2. Track After      ✕  │
-│  3. ...              ✕  │
-│  4. ...              ✕  │
-│  5. ...              ✕  │
+│  Up next   Radio: …     │  ← source label
+│  1. Next Track       ×  │
+│  2. Track After      ×  │
+│  3. …                ×  │
 └─────────────────────────┘
 ```
 
-**Queue:**
-- Shows next 5 tracks
-- `[✕]` removes track from queue
-- In Playlist mode: shows next tracks from playlist
-- In Radio mode: shows AI-suggested tracks
+- Close via swipe down or the chevron button; there is no cross-style close control.
+- Artwork is 240×240 px, rounded 16 px, with an accent glow.
+- Timeline is a draggable `<input type="range">` with elapsed/total labels;
+  dragging updates the label immediately and seeks on release.
+- Queue shows 5 tracks. Items are numbered and clickable to jump to that track;
+  a remove control removes an item from the queue.
+- Source label shows `Radio: similar songs`, `From Favorites`, or
+  `From <playlist>`.
+- States:
+  - **Loading** — the play button is dimmed while the stream resolves.
+  - **Paused** — the play icon is shown, artwork scales down slightly.
+  - **Error** — a toast explains the failure; failed tracks skip automatically.
+  - **Finding similar songs…** — shown in the queue area while radio refills.
+  - **Nothing queued.** — shown when there is no upcoming track.
 
-### 2.6 Profile Screen (tap 👤)
+### 2.8 Profile Screen
 
 ```
 ┌─────────────────────────┐
 │ ←  Profile              │
-│  👤 First Name          │  ← Telegram display name
+│  (A) First Name         │  ← avatar = first letter
+│      @username          │  ← when available
 │─────────────────────────│
-│  My Playlists           │
-│  [+ New Playlist    ]   │  ← create button
+│  My playlists           │
+│  [+ New playlist]       │
 │─────────────────────────│
-│  🎵 Playlist Name  [→]  │
-│     12 tracks           │
-│─────────────────────────│
-│  🎵 Another Playlist[→] │
-│     5 tracks            │
+│  🎵 Playlist Name   >   │
+│     12 songs            │
+│  No playlists yet…      │  ← empty state
 └─────────────────────────┘
 ```
 
-### 2.7 Settings Screen (tap ⚙️)
+- The avatar shows the first letter of the display name (uppercase); it is
+  decorative (`aria-hidden`).
+- `@username` is shown only when Telegram provides it.
+- “New playlist” opens a text sheet; Enter submits.
+- Playlist rows show name and track count and open the Playlist screen.
+- Empty state: “No playlists yet. Create one to group songs you like.”
+
+### 2.9 Settings Screen
 
 ```
 ┌─────────────────────────┐
 │ ←  Settings             │
 │─────────────────────────│
 │  Theme                  │
-│  ○ Light    ● Dark      │  ← toggle
+│  [ Light ][ Dark ]      │  ← segmented control
 │─────────────────────────│
-│  Accent Color           │
-│  ● ○ ○ ○ ○             │  ← row of 15 color circles
-│  ○ ○ ○ ○ ○             │
-│  ○ ○ ○ ○ ○             │
+│  Accent color           │
+│  ● ● ● ● ●              │  ← 15 swatches, 5 per row
+│  ● ● ● ● ●              │
+│  ● ● ● ● ●              │
 │─────────────────────────│
 │  Wallpaper              │
-│  [Upload from gallery]  │  ← button
-│  [Remove wallpaper   ]  │  ← shown only if wallpaper is set
+│  [Upload from gallery]  │
+│  [Remove wallpaper]     │  ← only when set
 │─────────────────────────│
 │  History                │
 │  [Clear search history] │
-│  [Clear play history  ] │
+│  [Clear play history]   │
+│─────────────────────────│
+│  Your data              │
+│  [Delete all my data]   │  ← danger
 └─────────────────────────┘
 ```
 
-**Accent color picker:**
-- 15 filled circles, 32×32px each, 3 rows of 5
-- Selected circle has white ring border around it
-- Tapping any circle → entire app recolors instantly (CSS variable swap)
+- Theme is a segmented Light/Dark control, not a toggle.
+- Accent picker: 15 filled circles, 32×32 px, 5 per row. The selected swatch
+  has a white ring plus an outer line so it shows on light backgrounds.
+  Selecting one recolors the app immediately and triggers light haptics.
+- Wallpaper: upload from gallery and remove. The note states the picture stays
+  on this device only and is not uploaded.
+- History: clear search history and clear play history, each with a
+  confirmation.
+- **Your data → Delete all my data**: confirmation is mandatory. It removes
+  favorites, playlists, and history; shared playlist links stop working; the
+  action cannot be undone. On success the local lists are cleared and a toast
+  confirms deletion.
 
 ---
 
 ## 3. Interaction Patterns
 
 ### Search flow
-1. Tap search field → keyboard opens + "Recent Searches" is already visible
-2. Start typing → results appear in real-time (debounce 300ms)
-3. Tap a result → track starts playing immediately
-4. `[+]` button → track added to Favorites, button changes to `[✓]`
+
+1. Tap the search field → keyboard opens; recent searches are already visible.
+2. Typing at least 2 characters starts a debounced search (300 ms).
+3. Pressing Enter runs the search immediately and records the query.
+4. Tapping a search result records the search, blurs the field, and starts
+   radio mode.
 
 ### Adding to Favorites
-- From search results: tap `[+]` on track card
-- Haptic feedback on add: `Telegram.WebApp.HapticFeedback.impactOccurred('light')`
+
+- Tap `+` on a search or shared-playlist row.
+- The UI updates optimistically with light haptic feedback (`impactOccurred('light')`).
+- On API failure the change is rolled back and a toast shows the error.
+- Removing a favorite from the `⋯` menu uses the same optimistic pattern.
+
+### Confirmations and feedback
+
+- Destructive actions use `Telegram.WebApp.showConfirm` when available, with
+  `window.confirm` as a fallback.
+- Success and error feedback use toasts (`role="status"`, `aria-live="polite"`).
+- Bot-check errors show a user-friendly “Music service is temporarily
+  unavailable” message.
+- Failed tracks are skipped automatically. After 3 consecutive failures,
+  playback stops and a toast explains why.
 
 ### Playlist sharing
-1. Open Profile → tap playlist → three-dot menu `...`
-2. Tap "Share" → copy link `t.me/LammotBot/app?startapp=playlist_{token}`
-3. Recipient opens link → Telegram opens Mini App → loads shared playlist in read-only view
+
+1. Open Profile → tap a playlist, or use the Play button's screen.
+2. Tap **Share** (or `⋯` → Share).
+3. The link comes from the server-provided `share_base` in `/api/me`, not a
+   hardcoded bot URL. The frontend appends `playlist_<share_token>`.
+4. Telegram's share sheet opens via `openTelegramLink`; if unavailable, the
+   link is copied to the clipboard.
+5. The recipient opens the Mini App and sees the read-only Shared Playlist
+   screen.
 
 ---
 
 ## 4. Telegram-Specific APIs
 
 ```javascript
-// Prevent accidental close on swipe down
+Telegram.WebApp.ready();
+Telegram.WebApp.expand();
 Telegram.WebApp.disableVerticalSwipes();
 
-// Expand to full height
-Telegram.WebApp.expand();
+Telegram.WebApp.BackButton.show();
+Telegram.WebApp.BackButton.hide();
+Telegram.WebApp.BackButton.onClick(handleBack);
 
-// Haptic feedback when adding to favorites
 Telegram.WebApp.HapticFeedback.impactOccurred('light');
+Telegram.WebApp.HapticFeedback.notificationOccurred('success');
 
-// Read Telegram user identity
+Telegram.WebApp.showConfirm(message, callback);
+Telegram.WebApp.openTelegramLink(url);
+
+Telegram.WebApp.setHeaderColor(color);
+Telegram.WebApp.setBackgroundColor(color);
+Telegram.WebApp.setBottomBarColor(color);
+
 const user = Telegram.WebApp.initDataUnsafe.user;
 // { id, first_name, username, language_code }
 
-// Theme sync (optional)
-const colorScheme = Telegram.WebApp.colorScheme; // 'light' | 'dark'
+const startParam = Telegram.WebApp.initDataUnsafe.start_param;
+// starts with "playlist_" for shared playlists
+
+const initData = Telegram.WebApp.initData;  // sent as "Authorization: tma ..."
 ```
 
 ---
 
 ## 5. Wallpaper Behavior
 
-- User uploads image from gallery (via `<input type="file" accept="image/*">`)
-- Image stored as base64 in `localStorage` (no server upload needed)
-- Applied as `background-image` on the app shell
-- Overlay: semi-transparent layer (`rgba(var(--bg-primary-rgb), 0.85)`) so text remains readable
-- In Light theme: overlay opacity 0.88
-- In Dark theme: overlay opacity 0.80
+- User uploads an image from the gallery (`<input type="file" accept="image/*">`).
+- The image is compressed to a maximum long side of **1280 px**.
+- JPEG quality starts at 0.82 and is reduced in 0.12 steps (down to 0.4)
+  until the data URL fits the storage limit.
+- The maximum stored data URL is about **1.5 million characters**.
+- The data URL is stored in `localStorage` under the key `lammot:wallpaper`;
+  it is never uploaded to the server.
+- It is applied as a fixed background layer. A semi-transparent overlay uses
+  `rgba(var(--bg-primary-rgb), var(--wallpaper-overlay))`: **0.88 in light
+  theme**, **0.80 in dark theme**.
+- The `has-wallpaper` body class controls display of the wallpaper and the
+  slightly opaque sticky headers.
 
 ---
 
 ## 6. Responsive Behavior
 
-- Designed for **mobile only** (Telegram Mini App)
-- Min width: 320px | Max width: 430px (centered on tablet)
-- Safe area insets respected: `padding-bottom: env(safe-area-inset-bottom)`
-- Bottom bar always above iOS home indicator
+- Designed for **mobile only** (Telegram Mini App).
+- Min width: 320 px | Max width: 430 px (centered on tablet).
+- Safe area insets respected via `--safe-bottom`.
+- Bottom bar always above the iOS home indicator.
+- The search bar and view headers are sticky; the full-screen player scrolls
+  independently with `overscroll-behavior: contain`.
 
 ---
 
@@ -321,13 +453,39 @@ const colorScheme = Telegram.WebApp.colorScheme; // 'light' | 'dark'
 navigator.mediaSession.metadata = new MediaMetadata({
   title: track.title,
   artist: track.artist,
-  artwork: [{ src: track.thumbnail, sizes: '96x96', type: 'image/jpeg' }]
+  artwork: [{ src: track.thumbnail_url, sizes: '544x544', type: 'image/jpeg' }]
 });
 
-navigator.mediaSession.setActionHandler('nexttrack', () => playNext());
-navigator.mediaSession.setActionHandler('previoustrack', () => playPrev());
+navigator.mediaSession.setActionHandler('nexttrack', () => next());
+navigator.mediaSession.setActionHandler('previoustrack', () => prev());
 navigator.mediaSession.setActionHandler('play', () => audio.play());
 navigator.mediaSession.setActionHandler('pause', () => audio.pause());
+navigator.mediaSession.setActionHandler('seekto', (details) => {
+  if (details && Number.isFinite(details.seekTime)) {
+    audio.currentTime = details.seekTime;
+  }
+});
+
+navigator.mediaSession.playbackState = playing ? 'playing' : 'paused';
 ```
 
-Lock screen and notification controls work automatically.
+Artwork uses `544x544` and `seekto` is handled. Position synchronization via
+`navigator.mediaSession.setPositionState` is **not currently implemented**.
+
+---
+
+## 8. Accessibility and States
+
+- Icon-only buttons carry `aria-label`; track rows and the more-actions button
+  include the track title in their labels.
+- Theme and accent controls use `role="radio"` with `aria-checked`.
+- The active bottom tab uses `aria-current="page"`.
+- Keyboard focus uses `:focus-visible` with a 2 px accent outline.
+- The full-screen player is a `role="dialog"` with `aria-modal="true"`.
+- The sheet and full-screen player return focus/navigation through the Telegram
+  Back button; Escape triggers the same back behavior.
+- States covered by the UI: loading (spinner or dimmed controls), empty,
+  error (with retry where applicable), offline (“No connection…”), and
+  bot-check (“Music service is temporarily unavailable”).
+- Outside Telegram, the home screen shows an “Open Lammot in Telegram” message
+  and disables the search field.
