@@ -13,7 +13,7 @@ import json
 import re
 import time
 import urllib.parse
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -128,6 +128,48 @@ async def test_search_rate_limited(client, headers, monkeypatch):
     with patch("app.main.search.search_songs", return_value=[]):
         codes = [(await client.get("/api/search?q=a", headers=headers)).status_code for _ in range(3)]
     assert codes == [200, 200, 429]
+
+
+async def test_search_defaults_to_songs(client, headers):
+    with patch("app.main.search.search_songs", return_value=[]) as songs, \
+         patch("app.main.search.search_videos") as videos:
+        r = await client.get("/api/search?q=test", headers=headers)
+    assert r.status_code == 200
+    songs.assert_called_once_with("test", 10)
+    videos.assert_not_called()
+
+
+async def test_search_type_videos_uses_video_search(client, headers):
+    fake = [{"video_id": VID, "title": "Remix", "kind": "video"}]
+    with patch("app.main.search.search_videos", return_value=fake) as videos, \
+         patch("app.main.search.search_songs") as songs:
+        r = await client.get("/api/search?q=kirman+lost&limit=5&type=videos", headers=headers)
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "data": fake}
+    videos.assert_called_once_with("kirman lost", 5)
+    songs.assert_not_called()
+
+
+async def test_search_rejects_unknown_type(client, headers):
+    with patch("app.main.search.search_songs") as songs, \
+         patch("app.main.search.search_videos") as videos:
+        r = await client.get("/api/search?q=test&type=all", headers=headers)
+    assert r.status_code == 422
+    songs.assert_not_called()
+    videos.assert_not_called()
+
+
+async def test_search_prefetch_receives_filtered_video_results(client, headers):
+    fake = [{"video_id": VID, "title": "Remix", "kind": "video"}]
+    prefetcher = MagicMock()
+    prefetcher.enqueue_results.return_value = 1
+    with patch("app.main.search.search_videos", return_value=fake), \
+         patch.object(main, "_search_prefetcher", prefetcher):
+        r = await client.get("/api/search?q=x&type=videos&format=aac", headers=headers)
+    assert r.status_code == 200
+    prefetcher.enqueue_results.assert_called_once_with(
+        fake, "aac", owner=123456, request_key=hashlib.sha256(b"x").hexdigest()[:10]
+    )
 
 
 # ------------------------------------------------------------------- stream
@@ -328,7 +370,23 @@ async def test_radio_uses_queue_and_play_history(client, headers):
         r = await client.get(f"/api/radio/{VID}?exclude={played}", headers=headers)
     assert r.status_code == 200
     assert r.json() == {"ok": True, "data": fake}
-    m.assert_called_once_with(VID, [played, VID2], 5)
+    m.assert_called_once_with(VID, [played, VID2], 5, kind="song")
+
+
+async def test_radio_passes_video_kind(client, headers):
+    fake = [{"video_id": "abcdefghijk", "title": "Similar video"}]
+    with patch("app.main.radio.get_radio_queue", return_value=fake) as m:
+        r = await client.get(f"/api/radio/{VID}?kind=video", headers=headers)
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "data": fake}
+    m.assert_called_once_with(VID, [], 5, kind="video")
+
+
+async def test_radio_rejects_unknown_kind(client, headers):
+    with patch("app.main.radio.get_radio_queue") as m:
+        r = await client.get(f"/api/radio/{VID}?kind=mix", headers=headers)
+    assert r.status_code == 422
+    m.assert_not_called()
 
 
 async def test_radio_rejects_invalid_exclude(client, headers):

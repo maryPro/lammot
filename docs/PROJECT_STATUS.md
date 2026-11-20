@@ -1,7 +1,7 @@
 # Lammot — Project Status
 
 Last updated: 2026-11-21
-Verified against: `f181d9d` (PR #34)
+Verified against: `5330d83` (Extended search)
 Maintained by: Project Manager / Architect
 
 > Read this first for current state. Use [ARCHITECTURE.md](../ARCHITECTURE.md)
@@ -11,12 +11,14 @@ Maintained by: Project Manager / Architect
 
 ## Current focus
 
-- Player loading state: merged in PR #34; manual verification pending.
+- Extended search: an opt-in **Extended** tab finds regular YouTube videos
+  while **Songs** remains the default; playing a video starts video radio.
 
 ## In progress
 
 | Task | Owner | State | Next step | Updated |
 |---|---|---|---|---|
+| Extended search: Songs/Extended tabs, video search, video radio | Developer (extended worktree) | Implemented, tests green; docs updated; pending PR and deploy, manual verification pending | Open the PR, merge after checks, then verify `kirman lost` in production | 2026-11-21 |
 | Cold-start fast path (`cold-start`) | Developer (cold-start worktree) | Implemented, tests green; pending deploy/verification | Deploy and compare `resolve_ms`; watch player-cache reuse and prune logs | 2026-11-20 |
 | Search-prefetch latency and log-hygiene fix (`PREFETCH-001`, `PREFETCH-002`) | Developer (fix-prefetch worktree) | Follow-up implemented, tests green; pending deploy/verification | Deploy and repeat the production-timing check | 2026-11-20 |
 | Player loading state: remove the dimmed intermediate Pause (`PLAYER-001`) | Developer (remove-pause worktree) | Merged in PR #34; manual verification pending | Verify in a real Telegram WebView; confirm spinner, no dimmed Pause, and Pause only after playback | 2026-11-21 |
@@ -45,6 +47,7 @@ Maintained by: Project Manager / Architect
 
 | Date | Decision | Why | Evidence |
 |---|---|---|---|
+| 2026-11-21 | Songs stays the default search; Extended is opt-in video search with a 45–900 s duration window, and video radio is seeded by the selected video | Remixes and fan uploads are regular YouTube videos that `filter="songs"` never returns; duration is a reliable contract where title heuristics are not | `app/search.py`, `app/radio.py`, `frontend/search-tabs.js` |
 | 2026-11-21 | Playback icon is driven by actual `playing` state, with a spinner during load | The `play` event fires before audio is audible; an explicit state avoids the dimmed Pause stage | `frontend/playback-view.js`, `frontend/app.js`, PR #34 |
 | 2026-11-17 | Background search prefetch is enabled by default: top 3 results, queue size 12, one worker, stale searches dropped | Warm the resolver cache without delaying search responses or queueing a tap behind prefetch work | `app/prefetch.py`, `app/main.py`, PR #18–#19 |
 | 2026-11-17 | iOS uses AAC; track metadata duration is authoritative; doubled media duration is ignored and a forced track end is used | Old iOS webviews cannot play WebM/Opus reliably and some report roughly doubled duration | `frontend/audio-format.js`, `frontend/player-time.js`, PR #20–#21 |
@@ -74,6 +77,11 @@ Maintained by: Project Manager / Architect
 
 ## Next up
 
+- Validate `search_videos("kirman lost")` and
+  `get_watch_playlist("XEinHUvu1Pc")` in production after the Extended search
+  merge; confirm the 9:29 remix is playable and long videos stay out of the
+  queue.
+- Consider an “Include long mixes” toggle only if users ask for it.
 - Deploy the tap-race fix and confirm `api_stream resolve_ms` is ~2–3 s for
   `clients=parallel(web,web_embedded)` / `parallel(web)`; confirm the player
   cache is reused and pruned on the volume.

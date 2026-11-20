@@ -1,9 +1,9 @@
 # LammotBot — UI Specification
 
 **Telegram Mini App | Language: English**
-Version: 1.3
+Version: 1.4
 
-Last verified against: `f181d9d` (PR #34, 2026-11-21)
+Last verified against: `main` + Extended search (PR pending, 2026-11-21)
 Project status: [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)
 
 ---
@@ -104,6 +104,7 @@ Silver, and Matrix Green, white text on dark accents.
 ```
 ┌─────────────────────────┐
 │  🔍 Search music…       │  ← 44px round search pill
+│  [Songs] [Extended]     │  ← compact tabs, Songs is default
 │─────────────────────────│
 │  Recent searches        │
 │   🕘 Zemfira            │  ← up to 10 unique queries
@@ -116,6 +117,10 @@ Silver, and Matrix Green, white text on dark accents.
 ```
 
 - The search field is a 44 px pill.
+- A compact segmented tabs row sits below the search pill: **Songs**
+  (default) and **Extended**. Songs searches official YouTube Music tracks;
+  Extended searches regular YouTube videos (remixes, slowed versions, fan
+  uploads). The tabs use `role="tab"` with `aria-selected`.
 - Search runs only on explicit Enter / the mobile keyboard Search action.
   Typing never requests or displays results.
 - Editing the query hides any previous results and returns to Recent searches.
@@ -150,6 +155,8 @@ Track card:
 - Artist: 12 px secondary color, one line, truncated.
 - Duration: 12 px secondary color, tabular numerals, right-aligned when known.
 - The row itself starts playback.
+- Extended results show a compact `Video` badge next to the title; song rows
+  have no badge.
 - Search and shared-playlist rows show the favorite button: `+` to add, `✓`
   (checked, greyed) when already saved.
 - The `⋯` more-actions button opens a sheet:
@@ -158,6 +165,12 @@ Track card:
   - **Add to Favorites** or **Remove from Favorites** — reflects current state.
   - **Remove from this playlist** — only in the playlist screen, marked danger.
 - The currently playing row gets an accent ring around its thumbnail.
+- The results list is labelled `Song results` or `Extended video results`.
+- Empty states:
+  - **Songs** — “Nothing found for “…”” plus a **Search Extended** button that
+    switches to the Extended tab and reruns the same query.
+  - **Extended** — “No videos under 15:00 found. Try a different query or
+    switch back to Songs.”
 
 ### 2.3 Favorites Screen
 
@@ -276,8 +289,11 @@ Appears above the bottom bar once a track is loaded. Height: `--mini-h` (64 px).
   dragging updates the label immediately and seeks on release.
 - Queue shows 5 tracks. Items are numbered and clickable to jump to that track;
   a remove control removes an item from the queue.
-- Source label shows `Radio: similar songs`, `From Favorites`, or
-  `From <playlist>`.
+- Source label shows `Radio: similar songs`, `Radio: similar videos`,
+  `From Favorites`, or `From <playlist>`.
+- Video seeds (`Radio: similar videos`) request video radio: the queue is
+  limited to 45–900 s videos, so long mixes do not enter the queue by default.
+  The seed itself plays even when it is longer than 15 minutes.
 - States:
   - **Loading** — a spinner in the play button; no Pause; the button is
     `aria-busy`.
@@ -369,6 +385,12 @@ Appears above the bottom bar once a track is loaded. Height: `--mini-h` (64 px).
 6. Tapping a recent search submits it immediately, through the same path as
    Enter.
 7. Clearing the field aborts an in-flight request and returns to idle.
+8. Tapping the other tab while a query is idle only switches the selected tab
+   and keeps recent searches; no request is sent.
+9. Tapping the other tab while a query is loading, done, or failed aborts any
+   in-flight request and reruns the same query with the new type. Stale
+   responses are ignored.
+10. Recent searches are shared between Songs and Extended.
 
 Enter with fewer than 2 characters is a no-op and keeps focus in the field. A
 duplicate Enter for the same query that is already loading or displayed is also

@@ -2,7 +2,8 @@
 app/search.py — Sprint 1: Search Module
 LammotBot Telegram Mini App Music Player
 
-Wraps ytmusicapi to search YouTube Music for official tracks.
+Wraps ytmusicapi to search YouTube Music for official tracks and, opt-in,
+regular YouTube videos (the Extended tab).
 Supports any language query: English, Russian, Ukrainian, etc.
 
 The search mirrors YouTube Music's own engine:
@@ -24,6 +25,14 @@ from ytmusicapi import YTMusic
 _ytmusic: Optional[YTMusic] = None
 
 
+# ---------------------------------------------------------------------------
+# Extended video search limits
+# ---------------------------------------------------------------------------
+VIDEO_MIN_DURATION_SECONDS = 45
+VIDEO_MAX_DURATION_SECONDS = 900
+VIDEO_RAW_LIMIT = 25
+
+
 def _get_client() -> YTMusic:
     """Return a shared (lazy-initialised) YTMusic client instance."""
     global _ytmusic
@@ -36,7 +45,7 @@ def _get_client() -> YTMusic:
 # Duration helpers
 # ---------------------------------------------------------------------------
 
-def _parse_duration(raw: str | None) -> int:
+def _parse_duration(raw: str | int | None) -> int:
     """
     Convert a 'MM:SS' or 'H:MM:SS' duration string to total seconds.
 
@@ -44,6 +53,8 @@ def _parse_duration(raw: str | None) -> int:
     """
     if not raw:
         return 0
+    if isinstance(raw, (int, float)):
+        return max(0, int(raw))
     try:
         parts = raw.strip().split(":")
         parts = [int(p) for p in parts]
@@ -162,3 +173,83 @@ def search_songs(query: str, limit: int = 10) -> list[dict]:
             continue
 
     return songs
+
+
+# ---------------------------------------------------------------------------
+# Extended search — regular YouTube videos
+# ---------------------------------------------------------------------------
+
+def _video_duration(item: dict) -> int:
+    return _parse_duration(item.get("length") or item.get("duration"))
+
+
+def _is_live(item: dict) -> bool:
+    return bool(item.get("isLive") or item.get("live") or item.get("isUpcoming"))
+
+
+def _video_artist(item: dict) -> str:
+    artists_raw = item.get("artists") or []
+    artist = artists_raw[0].get("name") if artists_raw else None
+    return artist or item.get("channel") or "Unknown Artist"
+
+
+def search_videos(query: str, limit: int = 10) -> list[dict]:
+    """
+    Search YouTube for regular videos (remixes, slowed versions, fan uploads).
+
+    Extended search is opt-in: the default Songs tab keeps using
+    ``filter="songs"``.  Results are limited to a 45–900 second window with a
+    known duration; live, upcoming and malformed items are skipped.
+
+    Upstream ytmusicapi errors are not swallowed: they propagate so the API
+    layer can return 502.
+    """
+    if not query or not query.strip():
+        return []
+
+    client = _get_client()
+    raw_results: list[dict] = client.search(
+        query=query.strip(),
+        filter="videos",
+        limit=VIDEO_RAW_LIMIT,
+    )
+
+    videos: list[dict] = []
+
+    for item in raw_results:
+        if len(videos) >= limit:
+            break
+
+        try:
+            video_id: str = item.get("videoId") or ""
+            if not video_id or len(video_id) != 11:
+                continue
+
+            duration_seconds = _video_duration(item)
+            if duration_seconds <= 0:
+                continue
+            if duration_seconds < VIDEO_MIN_DURATION_SECONDS:
+                continue
+            if duration_seconds > VIDEO_MAX_DURATION_SECONDS:
+                continue
+            if _is_live(item):
+                continue
+
+            videos.append(
+                {
+                    "video_id": video_id,
+                    "title": item.get("title") or "",
+                    "artist": _video_artist(item),
+                    "duration_seconds": duration_seconds,
+                    "thumbnail_url": _best_thumbnail(
+                        item.get("thumbnails") or item.get("thumbnail")
+                    ),
+                    "kind": "video",
+                }
+            )
+
+        except Exception:
+            # Defensive: one malformed item must not fail the whole batch
+            continue
+
+    return videos

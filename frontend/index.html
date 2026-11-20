@@ -10,6 +10,7 @@
   <script src="/audio-format.js" defer></script>
   <script src="/player-time.js" defer></script>
   <script src="/search-query.js" defer></script>
+  <script src="/search-tabs.js" defer></script>
   <script src="/playback-view.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
@@ -29,6 +30,10 @@
             <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
           </button>
         </div>
+      </div>
+      <div class="search-tabs" role="tablist" aria-label="Search type">
+        <button id="search-tab-songs" type="button" role="tab" aria-selected="true" aria-controls="home-body">Songs</button>
+        <button id="search-tab-videos" type="button" role="tab" aria-selected="false" aria-controls="home-body">Extended</button>
       </div>
       <div class="screen-body" id="home-body"></div>
     </section>
