@@ -29,10 +29,10 @@ expired ones are never handed out.
 
 yt-dlp needs a JavaScript runtime (Deno) and the yt-dlp-ejs package for
 YouTube since 2025.11 — install "yt-dlp[default]" and Deno (see README).
-Interactive taps ask web + web_embedded in one extraction: web usually supplies
-a gate-free muxed stream, while web_embedded supplies audio-only 251/140.  The
-n/sig solve is cheap after the first track because the preprocessed player cache
-is persisted in YTDLP_CACHE_DIR; the Deno client race is only a fallback.
+Interactive taps race the combined web + web_embedded set with fallback sets:
+web usually supplies a gate-free muxed stream, while web_embedded supplies
+audio-only 251/140.  The n/sig solve is cheap after the first track because the
+preprocessed player cache is persisted in YTDLP_CACHE_DIR.
 """
 
 from __future__ import annotations
@@ -138,14 +138,13 @@ _BOT_CHECK_COOLDOWN: float = 60
 _MAX_AVAILABILITY_WAIT: float = 2.0
 
 # Maximum time to wait for a discovered pre-roll gate, after yt-dlp has
-# already returned a format.  This is not a total tap budget: a cold Deno
-# fallback can take ~5 s on Railway, so a hard 3 s total deadline made every
-# new track return 502 at 3.0 s.
-_MAX_TAP_GATE_WAIT: float = 3.0
+# already returned a format.  Observed gates are 4-5 s; a 3 s cap turned those
+# into 502s when every client response was gated.
+_MAX_TAP_GATE_WAIT: float = 5.0
 
-# Hard cap on the fallback client race only.  The combined web + web_embedded
-# pass normally answers first; the race is a safety net for a hung or gated
-# client.  Keep the cap well above the measured cold fallback resolve.
+# Hard cap on the tap client race.  The combined web + web_embedded set and
+# the fallback sets start together; the first usable response wins.  Keep the
+# cap well above the measured cold resolve.
 _MAX_TAP_EXTRACT_WAIT: float = 12.0
 
 # Resolver client strategy.  A tap asks web and web_embedded in one yt-dlp
@@ -507,6 +506,17 @@ def _tap_fast_clients() -> Tuple[str, ...]:
     if os.getenv("YTDLP_PLAYER_CLIENTS", "").strip():
         return _configured_clients()
     return _TAP_FAST_CLIENTS
+
+
+def _tap_client_sets() -> Tuple[Tuple[str, ...], ...]:
+    """Race sets for a tap: the combined fast pass plus fallbacks.
+
+    The fast set is submitted first, but every set starts together.  If the
+    fast set receives a gated player response, a fallback set can return an
+    ungated duplicate without waiting for the fast set to finish first.
+    """
+    fast = _tap_fast_clients()
+    return tuple(dict.fromkeys((fast, ("web_embedded", "default"), ("web",))))
 
 
 def _fallback_clients() -> Tuple[str, ...]:
@@ -897,8 +907,7 @@ def _resolve_parallel(
     cookiefile: Optional[str] = None,
     max_gate_wait: float = _MAX_TAP_GATE_WAIT,
     *,
-    initial_formats: Optional[list[dict]] = None,
-    deadline: Optional[float] = None,
+    client_sets: Optional[Tuple[Tuple[str, ...], ...]] = None,
 ) -> Tuple[str, Dict[str, str]]:
     """
     Race several client sets and return the first ungated format.
@@ -909,24 +918,21 @@ def _resolve_parallel(
     format; if every set is gated, we merge their formats and wait for the
     earliest gate, but never longer than *max_gate_wait*.
 
-    *initial_formats* are formats from an earlier fast pass (web +
-    web_embedded).  They are merged so an already-gated duplicate can still
-    win, and *deadline* shares the tap's total extraction budget with that
-    earlier pass.
+    *client_sets* defaults to the fallback race; taps pass the combined fast
+    set plus fallbacks so a gated fast response does not delay the retry.
     """
     started = time.perf_counter()
-    extract_deadline = (
-        deadline if deadline is not None else started + _MAX_TAP_EXTRACT_WAIT
-    )
-    formats: list[dict] = list(initial_formats or [])
+    extract_deadline = started + _MAX_TAP_EXTRACT_WAIT
+    formats: list[dict] = []
     errors: list[ResolverError] = []
     best: Optional[tuple[dict, str]] = None
     extract_calls = 0
+    sets = client_sets or _FAST_CLIENT_SETS
 
     pool = _EXTRACT_POOL
     futures = {
         pool.submit(_extract_formats, video_id, clients, cookiefile): clients
-        for clients in _FAST_CLIENT_SETS
+        for clients in sets
     }
     pending = set(futures)
     try:
@@ -1012,62 +1018,21 @@ def _resolve_tap(
     max_gate_wait: float = _MAX_TAP_GATE_WAIT,
 ) -> Tuple[str, Dict[str, str]]:
     """
-    Resolve an interactive tap with one combined, cache-friendly pass.
+    Race the combined fast pass with fallbacks for an interactive tap.
 
     web contributes the muxed itag 18 that is usually gate-free; web_embedded
     contributes audio-only 251/140.  yt-dlp downloads the player once and solves
     all n/sig challenges in one Deno process, and the preprocessed player cache
-    makes that solve cheap after the first track for a player version.  When the
-    pass has no format usable within ``_MAX_AVAILABILITY_WAIT``, fall back to
-    the client race and merge both result sets.
+    makes that solve cheap after the first track for a player version.  The
+    fallback sets start together with the fast set, so a gated fast response
+    does not add its full extraction time before the retry.
     """
-    started = time.perf_counter()
-    deadline = started + _MAX_TAP_EXTRACT_WAIT
-    fast_formats: list[dict] = []
-    fast_clients = _tap_fast_clients()
-
-    try:
-        fast_formats = _extract_formats(video_id, fast_clients, cookiefile)
-    except (BotCheckError, VideoUnavailableError):
-        # IP/account or video-wide: another client cannot fix it.
-        raise
-    except (FormatUnavailableError, TransientResolveError) as exc:
-        logger.info(
-            "Resolver: %s fast clients=%s failed (%s), trying the race",
-            video_id,
-            ",".join(fast_clients),
-            type(exc).__name__,
-        )
-    else:
-        fmt = _select_format(fast_formats, prefer)
-        if _usable_now(fmt):
-            logger.info(
-                "Resolver: %s outcome=%s clients=fast(%s) passes=1 "
-                "extract_ms=%.0f gate_ms=%.0f itag=%s",
-                video_id,
-                "ready",
-                ",".join(fast_clients),
-                (time.perf_counter() - started) * 1000,
-                _gate_wait(fmt) * 1000,
-                fmt.get("format_id"),
-            )
-            _wait_until_available(fmt, max_gate_wait)
-            return _stream_url_and_headers(fmt)
-        elif fmt is not None:
-            logger.info(
-                "Resolver: %s fast clients=%s gated %.0f ms, trying the race",
-                video_id,
-                ",".join(fast_clients),
-                _gate_wait(fmt) * 1000,
-            )
-
     return _resolve_parallel(
         video_id,
         prefer,
         cookiefile,
         max_gate_wait,
-        initial_formats=fast_formats,
-        deadline=deadline,
+        client_sets=_tap_client_sets(),
     )
 
 

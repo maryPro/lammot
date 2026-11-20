@@ -902,22 +902,22 @@ class TestParallelResolution:
 
         assert url == _FAKE_URL_140
 
-    def test_tap_gate_wait_is_three_seconds(self, monkeypatch):
+    def test_tap_gate_wait_covers_observed_gates(self, monkeypatch):
         monkeypatch.setattr(resolver, "_PARALLEL_RESOLVE", True)
         with patch("app.resolver._resolve_tap", return_value=(_FAKE_URL_18, {})) as tap:
             get_stream_url("dQw4w9WgXcQ")
 
-        assert resolver._MAX_TAP_GATE_WAIT == 3.0
+        assert resolver._MAX_TAP_GATE_WAIT == 5.0
         assert tap.call_args.args[3] == resolver._MAX_TAP_GATE_WAIT
 
     def test_extraction_timeout_is_separate_from_the_gate_wait(self):
-        """A 3 s total deadline made every cold resolve return 502 at 3.0 s."""
+        """The extraction cap must stay above the gate wait."""
         assert resolver._MAX_TAP_EXTRACT_WAIT >= 10.0
         assert resolver._MAX_TAP_EXTRACT_WAIT > resolver._MAX_TAP_GATE_WAIT
 
 
 class TestFastClientPath:
-    """The first tap pass uses the cookie-capable embedded client, then falls back."""
+    """Taps race the combined cookie-capable fast set with fallbacks."""
 
     def test_pick_format_accepts_suffixed_audio_track_ids(self):
         """Multi-track clients return ids such as 251-0, 140-1."""
@@ -972,30 +972,22 @@ class TestFastClientPath:
         monkeypatch.setenv("YTDLP_PLAYER_CLIENTS", "web")
 
         assert resolver._tap_fast_clients() == ("web",)
+        assert resolver._tap_client_sets()[0] == ("web",)
         assert resolver._prefetch_client_sets()[0] == ("web",)
         assert ("visionos",) not in resolver._prefetch_client_sets()
 
-    def test_tap_uses_the_fast_client_and_skips_the_fallback_race(self, monkeypatch):
-        monkeypatch.setattr(resolver, "_PARALLEL_RESOLVE", True)
-        calls = []
+    def test_tap_client_sets_start_with_the_combined_fast_client(self):
+        sets = resolver._tap_client_sets()
 
-        def fake_extract(_video_id, clients, _cookiefile=None, **_kwargs):
-            calls.append(clients)
-            return _FORMATS_BOTH
+        assert sets[0] == resolver._TAP_FAST_CLIENTS
+        assert ("web_embedded", "default") in sets
+        assert ("web",) in sets
 
-        with patch("app.resolver._extract_formats", side_effect=fake_extract), \
-             patch("app.resolver._resolve_parallel") as race:
-            url = get_stream_url("dQw4w9WgXcQ")
-
-        assert url == _FAKE_URL_251
-        assert calls == [resolver._TAP_FAST_CLIENTS]
-        race.assert_not_called()
-
-    def test_tap_falls_back_to_the_race_when_the_fast_client_is_gated(self, monkeypatch):
+    def test_tap_races_the_combined_fast_client_with_fallbacks(self, monkeypatch):
         monkeypatch.setattr(resolver, "_PARALLEL_RESOLVE", True)
         now = 1_800_000_000
         gated = [{"format_id": "251", "url": _FAKE_URL_251_LATE, "available_at": now + 6}]
-        ungated = [{"format_id": "251", "url": _FAKE_URL_251_EARLY}]
+        ungated = [{"format_id": "18", "url": _FAKE_URL_18}]
         calls = []
 
         def fake_extract(_video_id, clients, _cookiefile=None, **_kwargs):
@@ -1006,9 +998,23 @@ class TestFastClientPath:
              patch("time.time", return_value=now):
             url = get_stream_url("dQw4w9WgXcQ")
 
-        assert url == _FAKE_URL_251_EARLY
-        assert calls[0] == resolver._TAP_FAST_CLIENTS
-        assert len(calls) > 1
+        assert url == _FAKE_URL_18
+        assert resolver._TAP_FAST_CLIENTS in calls
+        assert set(calls) == set(resolver._tap_client_sets())
+
+    def test_tap_returns_the_first_ungated_format_from_the_race(self, monkeypatch):
+        monkeypatch.setattr(resolver, "_PARALLEL_RESOLVE", True)
+        calls = []
+
+        def fake_extract(_video_id, clients, _cookiefile=None, **_kwargs):
+            calls.append(clients)
+            return _FORMATS_BOTH
+
+        with patch("app.resolver._extract_formats", side_effect=fake_extract):
+            url = get_stream_url("dQw4w9WgXcQ")
+
+        assert url == _FAKE_URL_251
+        assert resolver._TAP_FAST_CLIENTS in calls
 
     def test_tap_does_not_retry_a_bot_check(self, monkeypatch):
         monkeypatch.setattr(resolver, "_PARALLEL_RESOLVE", True)
@@ -1022,25 +1028,7 @@ class TestFastClientPath:
             with pytest.raises(resolver.BotCheckError):
                 get_stream_url("dQw4w9WgXcQ")
 
-        assert calls == [resolver._TAP_FAST_CLIENTS]
-
-    def test_tap_merges_fast_client_formats_with_the_race(self, monkeypatch):
-        monkeypatch.setattr(resolver, "_PARALLEL_RESOLVE", True)
-        now = 1_800_000_000
-        fast = [{"format_id": "251", "url": _FAKE_URL_251_LATE, "available_at": now + 8}]
-        slow = [{"format_id": "251", "url": _FAKE_URL_251_EARLY, "available_at": now + 2}]
-
-        def fake_extract(_video_id, clients, _cookiefile=None, **_kwargs):
-            return fast if clients == resolver._TAP_FAST_CLIENTS else slow
-
-        with patch("app.resolver._extract_formats", side_effect=fake_extract), \
-             patch("time.time", return_value=now), \
-             patch("time.sleep") as sleep:
-            url = get_stream_url("dQw4w9WgXcQ")
-
-        assert url == _FAKE_URL_251_EARLY
-        sleep.assert_called_once()
-        assert sleep.call_args.args[0] == pytest.approx(2.0)
+        assert set(calls) == set(resolver._tap_client_sets())
 
 
 class TestGateCache:
