@@ -15,10 +15,12 @@ Rules:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import logging
 import os
 import re
+import sys
 import tempfile
 import time
 from collections import defaultdict, deque
@@ -38,7 +40,9 @@ from app import auth, bot, database, radio, resolver, search
 from app.prefetch import SearchPrefetcher
 
 logger = logging.getLogger("lammot.api")
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+# Railway labels stderr as [err]; expected INFO lines must go to stdout.
+logging.basicConfig(stream=sys.stdout, level=os.getenv("LOG_LEVEL", "INFO"))
+
 # httpx logs every request URL at INFO; Bot API URLs contain the bot token.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -113,6 +117,12 @@ COOKIES_MAX_BYTES = 100 * 1024
 SEARCH_PREFETCH_ENABLED = os.getenv("SEARCH_PREFETCH_ENABLED", "1") == "1"
 SEARCH_PREFETCH_TOP_N = min(5, max(1, _env_int("SEARCH_PREFETCH_TOP_N", 3)))
 SEARCH_PREFETCH_QUEUE_SIZE = min(50, max(1, _env_int("SEARCH_PREFETCH_QUEUE_SIZE", 12)))
+SEARCH_PREFETCH_SETTLE_SECONDS = min(2.0, max(0.0, _env_float(
+    "SEARCH_PREFETCH_SETTLE_SECONDS", 0.5
+)))
+SEARCH_PREFETCH_DEDUPE_SECONDS = min(5.0, max(0.0, _env_float(
+    "SEARCH_PREFETCH_DEDUPE_SECONDS", 1.0
+)))
 
 
 # Alert only on meaningful transitions, never once per failed track.
@@ -192,10 +202,16 @@ def _schedule_cdn_warm(url: str, headers: Dict[str, str]) -> None:
     task.add_done_callback(_warm_tasks.discard)
 
 
-async def _prefetch_resolve(video_id: str, fmt: str) -> tuple[str, Dict[str, str]]:
+async def _prefetch_resolve(
+    video_id: str, fmt: str, should_stop=None
+) -> tuple[str, Dict[str, str]]:
     """Resolve through the resolver's background path, then fetch its headers."""
     url = await run_in_threadpool(
-        resolver.get_stream_url, video_id, fmt, prefetch=True
+        resolver.get_stream_url,
+        video_id,
+        fmt,
+        prefetch=True,
+        should_stop=should_stop,
     )
     return url, resolver.get_stream_headers(video_id, fmt)
 
@@ -360,6 +376,8 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             _prefetch_warm,
             top_n=SEARCH_PREFETCH_TOP_N,
             queue_size=SEARCH_PREFETCH_QUEUE_SIZE,
+            settle_seconds=SEARCH_PREFETCH_SETTLE_SECONDS,
+            dedupe_seconds=SEARCH_PREFETCH_DEDUPE_SECONDS,
         )
         await _search_prefetcher.start()
 
@@ -531,6 +549,11 @@ def _ok(data: Any) -> Dict[str, Any]:
     return {"ok": True, "data": data}
 
 
+def _query_hash(query: str) -> str:
+    """Short, non-reversible key to correlate one search without logging it."""
+    return hashlib.sha256(query.encode("utf-8")).hexdigest()[:10]
+
+
 def _error_response(status: int, code: str, detail: str) -> JSONResponse:
     """Error body with a stable machine-readable code next to the human text."""
     return JSONResponse(
@@ -630,17 +653,29 @@ async def api_search(
     user: auth.TelegramUser = Depends(current_user),
 ):
     search_limiter.check(user.id)
+    q_hash = _query_hash(q)
     try:
         results = await run_in_threadpool(search.search_songs, q, limit)
     except Exception:
-        logger.exception("Search failed for query=%r", q)
+        logger.exception("Search failed for q_hash=%s", q_hash)
         raise HTTPException(status_code=502, detail="Search service unavailable")
+    enqueued = 0
     if _search_prefetcher is not None:
         try:
-            _search_prefetcher.enqueue_results(results, format, owner=user.id)
+            count = _search_prefetcher.enqueue_results(
+                results, format, owner=user.id, request_key=q_hash
+            )
+            enqueued = count if isinstance(count, int) else 0
         except Exception:
             # A prefetch bug must never turn a successful search into a 500.
             logger.exception("search prefetch enqueue failed")
+    logger.info(
+        "api_search q_hash=%s format=%s results=%d prefetch_enqueued=%d",
+        q_hash,
+        format,
+        len(results),
+        enqueued,
+    )
     return _ok(results)
 
 

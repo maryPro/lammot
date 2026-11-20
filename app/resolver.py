@@ -42,7 +42,7 @@ import time
 from collections import Counter
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import ExitStack
-from typing import Dict, Optional, Tuple
+from typing import Callable, Dict, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
 import yt_dlp  # type: ignore
@@ -77,6 +77,14 @@ class VideoUnavailableError(UnavailableError):
 
 class FormatUnavailableError(UnavailableError):
     """The video has no playable itag 251/140/18 right now."""
+
+
+class PrefetchCancelled(ResolverError):
+    """A background prefetch was superseded before it could produce a URL.
+
+    Internal control flow only: it must never be negative-cached or trigger an
+    owner alert.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +190,10 @@ _CANARY_SEMAPHORE = threading.BoundedSemaphore(1)
 # At most one background prefetch may occupy a resolve slot, so a user tap
 # always finds a free slot even while search results are being warmed.
 _PREFETCH_GUARD = threading.BoundedSemaphore(1)
+# Prefetch has its own single extraction slot on top of the global cap, so
+# background warm-up can hold at most one of the extraction slots and a tap
+# keeps at least two.
+_PREFETCH_EXTRACT_SEMAPHORE = threading.BoundedSemaphore(1)
 _MIN_RESOLVE_INTERVAL = _env_float("YTDLP_MIN_RESOLVE_INTERVAL", 0.0)
 _RESOLVE_PACING_LOCK = threading.Lock()
 _last_resolve_at = 0.0
@@ -410,6 +422,30 @@ def _ydl_opts(
     return opts
 
 
+class _ReadOnlyCookieYoutubeDL(yt_dlp.YoutubeDL):
+    """yt-dlp that never writes to the shared cookies file.
+
+    Parallel extractions used to rewrite the same Netscape file, which could
+    truncate it and produce "does not look like a Netscape format cookies
+    file".  The Telegram /cookies flow stays the only writer; extraction only
+    reads.
+    """
+
+    def save_cookies(self, *args, **kwargs) -> None:  # noqa: D401 - no-op
+        return None
+
+
+# Tests replace ``yt_dlp.YoutubeDL`` with a fake; production extraction always
+# uses the read-only subclass so concurrent extractions never rewrite cookies.
+_REAL_YTDL_CLASS = yt_dlp.YoutubeDL
+
+
+def _extraction_ydl_class(prefetch: bool) -> type:
+    if prefetch or yt_dlp.YoutubeDL is _REAL_YTDL_CLASS:
+        return _ReadOnlyCookieYoutubeDL
+    return yt_dlp.YoutubeDL
+
+
 def _cache_key(video_id: str, prefer: str) -> str:
     return video_id if prefer == "opus" else f"{video_id}:{prefer}"
 
@@ -527,6 +563,12 @@ def _select_format(formats: list[dict], prefer: str) -> Optional[dict]:
 
     muxed = _pick_format(formats, (_MUXED_ITAG,))
     if muxed is not None:
+        if fmt is None:
+            logger.info(
+                "Resolver: no preferred audio-only format; using muxed itag %s",
+                muxed.get("format_id"),
+            )
+            return muxed
         fmt_wait = _gate_wait(fmt)
         muxed_wait = _gate_wait(muxed)
         if fmt_wait - muxed_wait >= _GATE_SWITCH_MIN_SAVING:
@@ -556,16 +598,32 @@ def _classify_ytdlp_error(exc: Exception, video_id: str) -> ResolverError:
     )
 
 
+def _raise_if_stopped(should_stop: Optional[Callable[[], bool]]) -> None:
+    if should_stop is not None and should_stop():
+        raise PrefetchCancelled("background prefetch was superseded")
+
+
 def _extract_formats(
     video_id: str,
     player_clients: Tuple[str, ...],
     cookiefile: Optional[str] = None,
+    *,
+    prefetch: bool = False,
+    should_stop: Optional[Callable[[], bool]] = None,
 ) -> list[dict]:
     """Run yt-dlp for one client set and return its format list."""
     url = f"https://www.youtube.com/watch?v={video_id}"
-    with _EXTRACT_SEMAPHORE:
+    ydl_class = _extraction_ydl_class(prefetch)
+    _raise_if_stopped(should_stop)
+    with ExitStack() as stack:
+        if prefetch:
+            # Acquire the prefetch slot before a global slot: otherwise several
+            # waiting prefetches could each pin a global extraction slot.
+            stack.enter_context(_PREFETCH_EXTRACT_SEMAPHORE)
+        stack.enter_context(_EXTRACT_SEMAPHORE)
+        _raise_if_stopped(should_stop)
         try:
-            with yt_dlp.YoutubeDL(_ydl_opts(list(player_clients), cookiefile)) as ydl:
+            with ydl_class(_ydl_opts(list(player_clients), cookiefile)) as ydl:
                 info: dict = ydl.extract_info(url, download=False)
         except yt_dlp.utils.YoutubeDLError as exc:
             raise _classify_ytdlp_error(exc, video_id) from exc
@@ -573,6 +631,7 @@ def _extract_formats(
             raise TransientResolveError(
                 f"yt-dlp failed for video_id={video_id!r} ({type(exc).__name__})"
             ) from exc
+    _raise_if_stopped(should_stop)
     return (info or {}).get("formats") or []
 
 
@@ -791,14 +850,100 @@ def _resolve_parallel(
     return fmt["url"], headers or dict(_DEFAULT_HEADERS)
 
 
+def _resolve_prefetch(
+    video_id: str,
+    prefer: str = "opus",
+    cookiefile: Optional[str] = None,
+    should_stop: Optional[Callable[[], bool]] = None,
+    max_gate_wait: float = _MAX_TAP_GATE_WAIT,
+) -> Tuple[str, Dict[str, str]]:
+    """
+    Resolve a background prefetch one client set at a time.
+
+    Prefetch must never compete with a tap for extraction capacity, so it does
+    not start the parallel race.  It walks the same client sets sequentially,
+    stops at the first format usable now, and only merges and waits for the
+    earliest gate when every set was gated.  ``should_stop`` is checked between
+    attempts and before any wait, so a superseded job stops starting new work.
+    """
+    started = time.perf_counter()
+    formats: list[dict] = []
+    errors: list[ResolverError] = []
+    winner = ""
+    extract_calls = 0
+    fmt: Optional[dict] = None
+
+    for clients in _FAST_CLIENT_SETS:
+        _raise_if_stopped(should_stop)
+        try:
+            extra = _extract_formats(
+                video_id,
+                clients,
+                cookiefile,
+                prefetch=True,
+                should_stop=should_stop,
+            )
+        except PrefetchCancelled:
+            raise
+        except (BotCheckError, VideoUnavailableError):
+            raise
+        except (FormatUnavailableError, TransientResolveError) as exc:
+            errors.append(exc)
+            continue
+        extract_calls += 1
+        formats.extend(extra)
+        fmt = _select_format(formats, prefer)
+        if _usable_now(fmt):
+            winner = ",".join(clients)
+            break
+
+    if fmt is None:
+        if errors:
+            raise _pick_resolver_error(errors)
+        raise FormatUnavailableError(
+            f"No supported audio format (itag 251, 140 or 18) found "
+            f"for video_id={video_id!r}"
+        )
+
+    _raise_if_stopped(should_stop)
+    if not winner:
+        winner = "merged"
+
+    logger.info(
+        "Resolver: %s outcome=%s clients=prefetch(%s) passes=%d "
+        "extract_ms=%.0f gate_ms=%.0f itag=%s",
+        video_id,
+        "ready" if _usable_now(fmt) else "gated",
+        winner,
+        extract_calls,
+        (time.perf_counter() - started) * 1000,
+        _gate_wait(fmt) * 1000,
+        fmt.get("format_id"),
+    )
+
+    _raise_if_stopped(should_stop)
+    _wait_until_available(fmt, max_gate_wait)
+    _raise_if_stopped(should_stop)
+
+    raw_headers = fmt.get("http_headers") or {}
+    headers = {k: str(v) for k, v in raw_headers.items() if k in _FORWARDED_HEADERS}
+    return fmt["url"], headers or dict(_DEFAULT_HEADERS)
+
+
 def _resolve_via_ytdlp(
     video_id: str,
     prefer: str = "opus",
     cookiefile: Optional[str] = None,
     parallel: bool = True,
     max_gate_wait: float = _MAX_TAP_GATE_WAIT,
+    prefetch: bool = False,
+    should_stop: Optional[Callable[[], bool]] = None,
 ) -> Tuple[str, Dict[str, str]]:
-    """Dispatch to the parallel race for playback and prefetch, serial for canary."""
+    """Dispatch to the prefetch path, the parallel race, or serial canary."""
+    if prefetch:
+        return _resolve_prefetch(
+            video_id, prefer, cookiefile, should_stop, max_gate_wait
+        )
     if parallel and _PARALLEL_RESOLVE:
         return _resolve_parallel(video_id, prefer, cookiefile, max_gate_wait)
     return _resolve_serial(video_id, prefer, cookiefile)
@@ -848,6 +993,8 @@ def _resolve_with_accounts(
     cookiefile: Optional[str] = None,
     parallel: bool = True,
     max_gate_wait: float = _MAX_TAP_GATE_WAIT,
+    prefetch: bool = False,
+    should_stop: Optional[Callable[[], bool]] = None,
 ) -> Tuple[str, Dict[str, str], str]:
     """
     Try the active cookie file, then the reserve one on a bot check.
@@ -857,7 +1004,13 @@ def _resolve_with_accounts(
     """
     if cookiefile is not None:
         url, headers = _resolve_via_ytdlp(
-            video_id, prefer, cookiefile, parallel=parallel, max_gate_wait=max_gate_wait
+            video_id,
+            prefer,
+            cookiefile,
+            parallel=parallel,
+            max_gate_wait=max_gate_wait,
+            prefetch=prefetch,
+            should_stop=should_stop,
         )
         return url, headers, _active_account()
 
@@ -884,7 +1037,13 @@ def _resolve_with_accounts(
             continue
         try:
             url, headers = _resolve_via_ytdlp(
-                video_id, prefer, path, parallel=parallel, max_gate_wait=max_gate_wait
+                video_id,
+                prefer,
+                path,
+                parallel=parallel,
+                max_gate_wait=max_gate_wait,
+                prefetch=prefetch,
+                should_stop=should_stop,
             )
         except BotCheckError as exc:
             last_bot_check = exc
@@ -903,7 +1062,13 @@ def _resolve_with_accounts(
         logger.warning("Resolver: no usable cookies file, resolving anonymously")
 
     url, headers = _resolve_via_ytdlp(
-        video_id, prefer, None, parallel=parallel, max_gate_wait=max_gate_wait
+        video_id,
+        prefer,
+        None,
+        parallel=parallel,
+        max_gate_wait=max_gate_wait,
+        prefetch=prefetch,
+        should_stop=should_stop,
     )
     return url, headers, active
 
@@ -919,6 +1084,7 @@ def get_stream_url(
     cookiefile: Optional[str] = None,
     dedicated: bool = False,
     prefetch: bool = False,
+    should_stop: Optional[Callable[[], bool]] = None,
 ) -> str:
     """
     Return a direct HTTPS audio CDN URL for a YouTube video.
@@ -940,10 +1106,15 @@ def get_stream_url(
         Use the canary's own semaphore instead of the shared user slots.
         Used by the canary so it never delays a tap.
     prefetch:
-        Background warm-up.  It uses the same client race as a tap, so it
-        survives the same pre-roll gates.  At most one prefetch may occupy a
-        resolve slot; other prefetches wait without taking a slot, so a tap is
-        never queued behind background work.
+        Background warm-up.  It walks the client sets sequentially and holds at
+        most one extraction slot, so a tap keeps the rest of the extraction
+        capacity.  At most one prefetch may occupy a resolve slot; other
+        prefetches wait without taking a slot, so a tap is never queued behind
+        background work.
+    should_stop:
+        Optional cooperative cancellation for a background prefetch.  Checked
+        between client attempts and before any availability wait; a cancelled
+        prefetch raises ``PrefetchCancelled`` without touching the caches.
 
     Raises
     ------
@@ -1008,6 +1179,8 @@ def get_stream_url(
                 cookiefile,
                 parallel=not dedicated,
                 max_gate_wait=_MAX_TAP_GATE_WAIT,
+                prefetch=prefetch,
+                should_stop=should_stop,
             )
         except UnavailableError as exc:
             if not force:
@@ -1018,6 +1191,10 @@ def get_stream_url(
         except (BotCheckError, TransientResolveError) as exc:
             _record_failure(exc)
             raise
+
+        if prefetch:
+            # A superseded job must not populate the cache after cancellation.
+            _raise_if_stopped(should_stop)
 
         ttl = _ttl_for_url(stream_url)
         if ttl > 0:

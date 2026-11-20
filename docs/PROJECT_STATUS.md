@@ -1,7 +1,7 @@
 # Lammot — Project Status
 
 Last updated: 2026-11-20
-Verified against: `main @ 1056314`
+Verified against: `main @ 06e76d3`
 Maintained by: Project Manager / Architect
 
 > Read this first for current state. Use [ARCHITECTURE.md](../ARCHITECTURE.md)
@@ -11,23 +11,24 @@ Maintained by: Project Manager / Architect
 
 ## Current focus
 
-- Documentation refresh: bring `ARCHITECTURE.md` (v1.2) and `UI_SPEC.md`
-  (v1.1) in line with `main`, and start this status journal.
-- After this work merges, replace this section with the next confirmed task or
-  “None recorded”.
+- Search-prefetch latency investigation: stale in-flight prefetch work and
+  shared extraction slots can delay the final query’s tap-to-audio by roughly
+  4–11 s.
+- Fix the prefetch scheduler and resolver capacity policy, then verify the
+  production `api_stream resolve_ms` and `audio_relay first_chunk_ms` numbers.
 
 ## In progress
 
 | Task | Owner | State | Next step | Updated |
 |---|---|---|---|---|
-| Documentation refresh (`ARCHITECTURE.md` v1.2, `UI_SPEC.md` v1.1, `docs/PROJECT_STATUS.md`) | Developer (docs worktree) | In review pending merge | Merge, then replace Current focus | 2026-11-20 |
+| Search-prefetch latency and log-hygiene fix (`PREFETCH-001`, `PREFETCH-002`) | Developer (fix-prefetch worktree) | Implemented, tests green; pending review/merge | Review the PR, deploy, and run the production verification window | 2026-11-20 |
 
 ## Known bugs
 
 | ID | Severity | Symptom | Area | Workaround | Next step | Updated |
 |---|---|---|---|---|---|---|
-
-None recorded as of this commit.
+| PREFETCH-001 | High | After a search, waiting several seconds and tapping the top result can still take ~4–11 s to start audio. The final query’s prefetch can be blocked behind a stale in-flight job, and a tap can then wait for a cold resolve that competes with background extraction for slots. | Search prefetch / resolver | Use `SEARCH_PREFETCH_ENABLED=0` as an operational fallback if prefetch makes latency worse; otherwise retry | Add a settle window; give prefetch its own 1-slot sequential extraction path; add correlation/timing logs and regression tests; verify production `api_stream resolve_ms` and `audio_relay first_chunk_ms` | 2026-11-20 |
+| PREFETCH-002 | Medium | Parallel yt-dlp extractions can truncate or rewrite the shared cookies file, producing `does not look like a Netscape format cookies file` and risking permanent cookie corruption. | Resolver / cookies | Re-upload cookies with `/cookies` if errors persist | Make extraction read-only for cookies; keep `/cookies` as the only atomic writer; add a test | 2026-11-20 |
 
 ## Known limitations / tech debt
 
@@ -37,6 +38,7 @@ None recorded as of this commit.
 | `stream_cache` and `track_resolution` exist in SQLite but are unused | Schema contains dead tables and unused helper functions | Decide whether to remove them or wire up a persistent cache | 2026-11-20 |
 | In-memory cache, rate limiter, and resolver state require a single process | Multiple replicas would split state, multiply yt-dlp load, and contend on SQLite | Keep one replica, or redesign shared state before scaling out | 2026-11-20 |
 | Resolver depends on Deno and a fresh `yt-dlp` | YouTube changes can break resolution until dependencies are updated | Keep `yt-dlp[default]` and Deno current; watch the canary and `/health` | 2026-11-20 |
+| Cold yt-dlp extraction is roughly 2.7–5.4 s in production | A cold track cannot reliably start in under one second; only a completed prefetch or cache hit can | Set expectations from measured p50/p90, not a fixed “instant” promise | 2026-11-20 |
 
 ## Recent decisions
 
@@ -59,6 +61,9 @@ None recorded as of this commit.
 
 ## Next up
 
+- Fix `PREFETCH-001`: stale in-flight prefetch and extraction-slot contention.
+- Fix `PREFETCH-002`: concurrent cookie writes during yt-dlp extraction.
+- Reduce log noise: expected INFO must not appear as Railway `[err]`.
 - Close the JS test coverage gap in CI: run `tests/js/player-time.test.js`.
 - Decide whether to remove or wire up the unused SQLite cache tables.
 - Keep docs and this status file current after behavior changes.
