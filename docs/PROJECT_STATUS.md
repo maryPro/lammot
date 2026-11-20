@@ -1,7 +1,7 @@
 # Lammot — Project Status
 
 Last updated: 2026-11-21
-Verified against: `5330d83` (Extended search)
+Verified against: `main @ 783b41d`
 Maintained by: Project Manager / Architect
 
 > Read this first for current state. Use [ARCHITECTURE.md](../ARCHITECTURE.md)
@@ -11,14 +11,14 @@ Maintained by: Project Manager / Architect
 
 ## Current focus
 
-- Extended search: an opt-in **Extended** tab finds regular YouTube videos
-  while **Songs** remains the default; playing a video starts video radio.
+- Production verification of merged work: Extended search (#38/#39), the
+  player loading state (#34), and the deployed resolver/prefetch changes.
 
 ## In progress
 
 | Task | Owner | State | Next step | Updated |
 |---|---|---|---|---|
-| Extended search: Songs/Extended tabs, video search, video radio | Developer (extended worktree) | Implemented, tests green; docs updated; pending PR and deploy, manual verification pending | Open the PR, merge after checks, then verify `kirman lost` in production | 2026-11-21 |
+| Extended search production verification | PM/Developer | Merged in #38/#39; manual verification pending | Search `kirman lost` in production; confirm the 9:29 remix is playable, the `Video` badge is visible, video radio works, and long videos stay out of the queue; then close | 2026-11-21 |
 | Cold-start fast path (`cold-start`) | Developer (cold-start worktree) | Implemented, tests green; pending deploy/verification | Deploy and compare `resolve_ms`; watch player-cache reuse and prune logs | 2026-11-20 |
 | Search-prefetch latency and log-hygiene fix (`PREFETCH-001`, `PREFETCH-002`) | Developer (fix-prefetch worktree) | Follow-up implemented, tests green; pending deploy/verification | Deploy and repeat the production-timing check | 2026-11-20 |
 | Player loading state: remove the dimmed intermediate Pause (`PLAYER-001`) | Developer (remove-pause worktree) | Merged in PR #34; manual verification pending | Verify in a real Telegram WebView; confirm spinner, no dimmed Pause, and Pause only after playback | 2026-11-21 |
@@ -64,6 +64,8 @@ Maintained by: Project Manager / Architect
 
 | Date | Change | Commit / PR |
 |---|---|---|
+| 2026-11-21 | Extended search: Songs/Extended tabs, video search, video radio | `56ad376` (#38) |
+| 2026-11-21 | Extended tabs centered and Video badge placed before duration | `783b41d` (#39) |
 | 2026-11-21 | Player loading state: spinner during load; Pause only after actual playback | `f181d9d` (#34) |
 | 2026-11-17 | Background prefetch of top search results | `66f6929` (#18) |
 | 2026-11-17 | Prefetch survives pre-roll gates and drops stale searches | `e5ed6b2` (#19) |
@@ -77,10 +79,9 @@ Maintained by: Project Manager / Architect
 
 ## Next up
 
-- Validate `search_videos("kirman lost")` and
-  `get_watch_playlist("XEinHUvu1Pc")` in production after the Extended search
-  merge; confirm the 9:29 remix is playable and long videos stay out of the
-  queue.
+- Validate Extended search in production: search `kirman lost`, confirm the
+  9:29 remix is playable, the `Video` badge is visible, video radio works, and
+  long videos stay out of the queue.
 - Consider an “Include long mixes” toggle only if users ask for it.
 - Deploy the tap-race fix and confirm `api_stream resolve_ms` is ~2–3 s for
   `clients=parallel(web,web_embedded)` / `parallel(web)`; confirm the player
