@@ -19,6 +19,7 @@ Covered scenarios:
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -767,7 +768,7 @@ class TestParallelResolution:
     @staticmethod
     def _by_clients(web, embedded, default):
         return {
-            ("visionos",): web,
+            ("web", "web_embedded"): web,
             ("web",): web,
             ("web_embedded",): embedded,
             ("web_embedded", "default"): default,
@@ -885,12 +886,12 @@ class TestParallelResolution:
         serial.assert_not_called()
 
     def test_prefetch_race_survives_a_gate_that_serial_rejects(self, monkeypatch):
-        """A gated web pass must not make prefetch give up while a tap would win."""
+        """A gated fast pass must not make prefetch give up while a tap would win."""
         monkeypatch.setattr(resolver, "_PARALLEL_RESOLVE", True)
         now = 1_800_000_000
         gated = [{"format_id": "18", "url": _FAKE_URL_18, "available_at": now + 4}]
         ungated = [{"format_id": "140", "url": _FAKE_URL_140}]
-        by_clients = self._by_clients(gated, ungated, gated)
+        by_clients = self._by_clients(gated, gated, ungated)
 
         def fake_extract(_video_id, clients, _cookiefile=None, **_kwargs):
             return by_clients[clients]
@@ -915,11 +916,11 @@ class TestParallelResolution:
         assert resolver._MAX_TAP_EXTRACT_WAIT > resolver._MAX_TAP_GATE_WAIT
 
 
-class TestVisionosFastPath:
-    """The first tap pass uses the no-JS-challenge client, then falls back."""
+class TestFastClientPath:
+    """The first tap pass uses the cookie-capable embedded client, then falls back."""
 
     def test_pick_format_accepts_suffixed_audio_track_ids(self):
-        """visionos returns multi-track ids such as 251-0, 140-1."""
+        """Multi-track clients return ids such as 251-0, 140-1."""
         formats = [
             {"format_id": "251-0", "url": _FAKE_URL_251},
             {"format_id": "140-0", "url": _FAKE_URL_140},
@@ -927,27 +928,54 @@ class TestVisionosFastPath:
 
         assert resolver._pick_format(formats) == formats[0]
 
-    def test_visionos_is_enabled_for_cookie_sessions(self):
-        clients = {"visionos": {"SUPPORTS_COOKIES": False}}
+    def test_preprocessed_player_cache_is_enabled(self):
+        from yt_dlp.extractor.youtube.jsc._builtin.ejs import EJSBaseJCP
 
-        assert resolver._enable_cookie_client(clients, "visionos") is True
-        assert clients["visionos"]["SUPPORTS_COOKIES"] is True
-        assert resolver._enable_cookie_client({}, "visionos") is False
+        assert EJSBaseJCP._ENABLE_PREPROCESSED_PLAYER_CACHE is True
 
-    def test_cookie_validation_keeps_a_cookie_client(self):
-        """The tap fast client must not replace the cookie-checking client."""
-        assert resolver._TAP_FAST_CLIENTS == ("visionos",)
+    def test_player_cache_cleanup_keeps_newest_three(self, tmp_path, monkeypatch):
+        cache_dir = tmp_path / "cache"
+        solver = cache_dir / "challenge-solver"
+        solver.mkdir(parents=True)
+        sig = cache_dir / "youtube-sigfuncs"
+        sig.mkdir()
+        (sig / "keep.json").write_text("{}", encoding="utf-8")
+        for index in range(5):
+            path = solver / f"player,{index}.json"
+            path.write_text("{}", encoding="utf-8")
+            os.utime(path, (1_800_000_000 + index, 1_800_000_000 + index))
+
+        monkeypatch.setenv("YTDLP_CACHE_DIR", str(cache_dir))
+        resolver._cleanup_player_cache(force=True)
+
+        assert sorted(p.name for p in solver.iterdir()) == [
+            "player,2.json",
+            "player,3.json",
+            "player,4.json",
+        ]
+        assert (sig / "keep.json").exists()
+
+    def test_extraction_prunes_the_player_cache(self):
+        with patch("app.resolver._cleanup_player_cache") as cleanup, \
+             patch("app.resolver.yt_dlp.YoutubeDL", return_value=_make_ydl_mock(_FORMATS_BOTH)):
+            resolver._extract_formats("dQw4w9WgXcQ", ("web_embedded",))
+
+        cleanup.assert_called_once()
+
+    def test_fast_client_is_a_cookie_client(self):
+        """The combined fast pass stays on cookie-capable clients."""
+        assert resolver._TAP_FAST_CLIENTS == ("web", "web_embedded")
         assert resolver._FAST_CLIENTS == ("web",)
 
     def test_player_clients_env_overrides_the_fast_path(self, monkeypatch):
-        """Operators can disable visionos without a code change."""
+        """Operators can replace the fast client without a code change."""
         monkeypatch.setenv("YTDLP_PLAYER_CLIENTS", "web")
 
         assert resolver._tap_fast_clients() == ("web",)
         assert resolver._prefetch_client_sets()[0] == ("web",)
         assert ("visionos",) not in resolver._prefetch_client_sets()
 
-    def test_tap_uses_visionos_and_skips_the_deno_race(self, monkeypatch):
+    def test_tap_uses_the_fast_client_and_skips_the_fallback_race(self, monkeypatch):
         monkeypatch.setattr(resolver, "_PARALLEL_RESOLVE", True)
         calls = []
 
@@ -963,7 +991,7 @@ class TestVisionosFastPath:
         assert calls == [resolver._TAP_FAST_CLIENTS]
         race.assert_not_called()
 
-    def test_tap_falls_back_to_the_race_when_visionos_is_gated(self, monkeypatch):
+    def test_tap_falls_back_to_the_race_when_the_fast_client_is_gated(self, monkeypatch):
         monkeypatch.setattr(resolver, "_PARALLEL_RESOLVE", True)
         now = 1_800_000_000
         gated = [{"format_id": "251", "url": _FAKE_URL_251_LATE, "available_at": now + 6}]
@@ -996,7 +1024,7 @@ class TestVisionosFastPath:
 
         assert calls == [resolver._TAP_FAST_CLIENTS]
 
-    def test_tap_merges_visionos_formats_with_the_race(self, monkeypatch):
+    def test_tap_merges_fast_client_formats_with_the_race(self, monkeypatch):
         monkeypatch.setattr(resolver, "_PARALLEL_RESOLVE", True)
         now = 1_800_000_000
         fast = [{"format_id": "251", "url": _FAKE_URL_251_LATE, "available_at": now + 8}]
@@ -1151,8 +1179,8 @@ class TestPrefetchExtractionPolicy:
 
         assert calls == [resolver._PREFETCH_SEQUENTIAL_CLIENT_SETS[0]]
 
-    def test_parallel_prefetch_starts_with_the_no_js_client(self, monkeypatch):
-        """Parallel mode wins one pass without starting Deno."""
+    def test_parallel_prefetch_starts_with_the_fast_client(self, monkeypatch):
+        """Parallel mode wins one pass with the cookie-capable client."""
         monkeypatch.setattr(resolver, "_PREFETCH_PARALLEL", True)
         calls = []
 
@@ -1165,7 +1193,7 @@ class TestPrefetchExtractionPolicy:
 
         assert calls == [resolver._TAP_FAST_CLIENTS]
 
-    def test_sequential_prefetch_keeps_the_no_js_client_first(self, monkeypatch):
+    def test_sequential_prefetch_keeps_the_fast_client_first(self, monkeypatch):
         monkeypatch.setattr(resolver, "_PREFETCH_PARALLEL", False)
         calls = []
 
