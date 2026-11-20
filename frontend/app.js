@@ -365,12 +365,9 @@
     },
     thumb(track.thumbnail_url),
     h('span', { class: 'track-text' },
-      track.kind === 'video'
-        ? h('span', { class: 'track-title has-badge' },
-            h('span', { class: 'track-title-text', text: track.title || 'Untitled' }),
-            h('span', { class: 'track-badge', text: 'Video' }))
-        : h('span', { class: 'track-title', text: track.title || 'Untitled' }),
+      h('span', { class: 'track-title', text: track.title || 'Untitled' }),
       h('span', { class: 'track-artist', text: track.artist || 'Unknown artist' })),
+    track.kind === 'video' ? h('span', { class: 'track-badge', text: 'Video' }) : null,
     track.duration_seconds ? h('span', { class: 'track-dur', text: fmtTime(track.duration_seconds) }) : null);
 
     const row = h('li', { class: 'track', 'data-track': track.video_id }, main);

@@ -35,3 +35,15 @@ def test_app_sends_the_selected_search_type():
     assert "SearchTabs.apiType(state.searchType)" in source
     assert "kind: player.radioKind === 'video' ? 'video' : 'song'" in source
     assert "Radio: similar videos" in source
+
+
+def test_video_badge_sits_left_of_the_duration():
+    source = (ROOT / "frontend" / "app.js").read_text(encoding="utf-8")
+    badge = source.index("class: 'track-badge'")
+    duration = source.index("class: 'track-dur'")
+    assert badge < duration
+
+
+def test_search_tabs_are_centred():
+    css = (ROOT / "frontend" / "style.css").read_text(encoding="utf-8")
+    assert "margin: var(--spacing-sm) auto 0;" in css
