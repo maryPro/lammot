@@ -29,9 +29,10 @@ expired ones are never handed out.
 
 yt-dlp needs a JavaScript runtime (Deno) and the yt-dlp-ejs package for
 YouTube since 2025.11 — install "yt-dlp[default]" and Deno (see README).
-Interactive taps try the visionos client first: it returns already-signed
-audio-only URLs without an n/sig challenge, so the common cold start never
-starts Deno.  The Deno-capable client race is only a fallback.
+Interactive taps ask web + web_embedded in one extraction: web usually supplies
+a gate-free muxed stream, while web_embedded supplies audio-only 251/140.  The
+n/sig solve is cheap after the first track because the preprocessed player cache
+is persisted in YTDLP_CACHE_DIR; the Deno client race is only a fallback.
 """
 
 from __future__ import annotations
@@ -56,35 +57,28 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# yt-dlp client capabilities
+# yt-dlp player cache
 # ---------------------------------------------------------------------------
 
-def _enable_cookie_client(clients: dict, name: str) -> bool:
-    """Mark a yt-dlp player client as usable with account cookies.
+def _enable_preprocessed_player_cache() -> None:
+    """Cache the expensive EJS analysis of the player JS.
 
-    yt-dlp drops clients whose ``SUPPORTS_COOKIES`` flag is false when a
-    logged-in cookies file is configured.  The visionos client does not need
-    cookies, but sending them is harmless and keeps its no-JS fast path
-    available in production.  Returns True when the client table was changed.
+    yt-dlp disables this cache by default because it writes a multi-megabyte
+    file per player version.  On the server the same player is reused for many
+    videos, and YTDLP_CACHE_DIR points at the persistent volume, so the cache
+    turns the second and later extractions into a challenge solve instead of a
+    full player analysis.  _cleanup_player_cache() bounds its size.
     """
-    client = clients.get(name)
-    if not isinstance(client, dict):
-        return False
-    client["SUPPORTS_COOKIES"] = True
-    return True
-
-
-def _enable_visionos_for_authenticated_sessions() -> None:
     try:
-        from yt_dlp.extractor.youtube._base import INNERTUBE_CLIENTS
+        from yt_dlp.extractor.youtube.jsc._builtin.ejs import EJSBaseJCP
     except Exception:  # pragma: no cover - guarded against yt-dlp layout changes
-        logger.debug("yt-dlp player-client table is unavailable")
+        logger.debug("yt-dlp EJS provider is unavailable")
         return
-    if _enable_cookie_client(INNERTUBE_CLIENTS, "visionos"):
-        logger.debug("Enabled visionos for authenticated yt-dlp sessions")
+    EJSBaseJCP._ENABLE_PREPROCESSED_PLAYER_CACHE = True
+    logger.debug("Enabled the preprocessed player cache for yt-dlp challenges")
 
 
-_enable_visionos_for_authenticated_sessions()
+_enable_preprocessed_player_cache()
 
 
 # ---------------------------------------------------------------------------
@@ -149,27 +143,30 @@ _MAX_AVAILABILITY_WAIT: float = 2.0
 # new track return 502 at 3.0 s.
 _MAX_TAP_GATE_WAIT: float = 3.0
 
-# Hard cap on the fallback client race only.  The no-JS visionos pass normally
-# answers first; the race is a safety net for a hung or gated client.  Keep the
-# cap well above the measured cold fallback resolve.
+# Hard cap on the fallback client race only.  The combined web + web_embedded
+# pass normally answers first; the race is a safety net for a hung or gated
+# client.  Keep the cap well above the measured cold fallback resolve.
 _MAX_TAP_EXTRACT_WAIT: float = 12.0
 
-# Resolver client strategy.  A tap first asks the visionos client, which
-# returns already-signed audio-only URLs (itags 251/140) without an n/sig
-# challenge, so yt-dlp never starts Deno for this pass.  Only when that pass has
-# no immediately usable format do we fall back to the client race below.
+# Resolver client strategy.  A tap asks web and web_embedded in one yt-dlp
+# extraction: web contributes the muxed itag 18 that is usually gate-free, and
+# web_embedded contributes audio-only 251/140.  yt-dlp downloads the player
+# once and solves all n/sig challenges in one Deno process; the preprocessed
+# player cache makes that solve cheap after the first track for a player
+# version.  Only when this pass has no immediately usable format do we fall
+# back to the client race below.
 _FAST_CLIENTS: Tuple[str, ...] = ("web",)
 _DEFAULT_CLIENTS: Tuple[str, ...] = ("web_embedded", "default")
-_TAP_FAST_CLIENTS: Tuple[str, ...] = ("visionos",)
+_TAP_FAST_CLIENTS: Tuple[str, ...] = ("web", "web_embedded")
 
 # Interactive taps race these client sets as a fallback.  These clients may
-# need the n/sig challenge and Deno, so they are only started when the no-JS
+# need the n/sig challenge and Deno, so they are only started when the fast
 # pass could not produce a usable format.  The pre-roll gate is assigned per
 # player response, so a differently resolved client often returns an ungated
 # format while the first one is still gated.
 _FAST_CLIENT_SETS: Tuple[Tuple[str, ...], ...] = (
-    ("web",),
     ("web_embedded", "default"),
+    ("web",),
     ("web_embedded",),
 )
 # Prefetch and taps both race; canary/cookie validation stay serial.
@@ -179,8 +176,8 @@ _PARALLEL_RESOLVE = True
 # third prefetch resolve/extract slot and one slot reserved for a user tap.
 _PREFETCH_PARALLEL = os.getenv("SEARCH_PREFETCH_PARALLEL", "0") == "1"
 
-# Prefetch tries the no-JS client first in both modes.  In parallel mode it then
-# moves the audio-only embedded/default set ahead of web.
+# Prefetch tries the fast client first in both modes.  In parallel mode it then
+# moves the multi-client embedded/default set ahead of web.
 _PREFETCH_FAST_CLIENT_SETS: Tuple[Tuple[str, ...], ...] = (
     _TAP_FAST_CLIENTS,
     ("web_embedded", "default"),
@@ -194,7 +191,7 @@ _PREFETCH_SEQUENTIAL_CLIENT_SETS: Tuple[Tuple[str, ...], ...] = (
 
 
 def _prefetch_client_sets() -> Tuple[Tuple[str, ...], ...]:
-    """Client-set order for prefetch: the no-JS client always goes first."""
+    """Client-set order for prefetch: the fast client always goes first."""
     fast = _tap_fast_clients()
     sets = (
         _PREFETCH_FAST_CLIENT_SETS
@@ -205,6 +202,59 @@ def _prefetch_client_sets() -> Tuple[Tuple[str, ...], ...]:
         return sets
     # YTDLP_PLAYER_CLIENTS overrides the first pass; drop the default fast set.
     return tuple(dict.fromkeys((fast, *sets[1:])))
+
+
+# The preprocessed player cache is ~4.4 MB per player version and yt-dlp does
+# not rotate it.  Keep the newest three and prune older files so the 434 MB
+# Railway volume cannot fill up.
+_PLAYER_CACHE_KEEP = 3
+_CACHE_CLEANUP_INTERVAL = 6 * 3600
+_cache_cleanup_lock = threading.Lock()
+_last_cache_cleanup = 0.0
+
+
+def _cleanup_player_cache(force: bool = False) -> None:
+    """Prune stale preprocessed-player files from YTDLP_CACHE_DIR."""
+    cache_dir = os.getenv("YTDLP_CACHE_DIR", "").strip()
+    if not cache_dir:
+        return
+
+    global _last_cache_cleanup
+    now = time.time()
+    with _cache_cleanup_lock:
+        if not force and now - _last_cache_cleanup < _CACHE_CLEANUP_INTERVAL:
+            return
+        _last_cache_cleanup = now
+
+    solver_dir = os.path.join(cache_dir, "challenge-solver")
+    try:
+        os.makedirs(solver_dir, exist_ok=True)
+        names = os.listdir(solver_dir)
+    except OSError:
+        return
+
+    players = [
+        os.path.join(solver_dir, name)
+        for name in names
+        if name.startswith("player") and name.endswith(".json")
+    ]
+    if len(players) <= _PLAYER_CACHE_KEEP:
+        return
+
+    try:
+        players.sort(key=os.path.getmtime, reverse=True)
+    except OSError:
+        return
+
+    pruned = 0
+    for path in players[_PLAYER_CACHE_KEEP:]:
+        try:
+            os.remove(path)
+            pruned += 1
+        except OSError:
+            pass
+    if pruned:
+        logger.info("Resolver: pruned %d stale player cache file(s)", pruned)
 
 
 # Muxed 360p MP4 with AAC audio (itag 18).  Used as a gate-free fallback when
@@ -297,8 +347,8 @@ _ITAG_ORDER = {
 # YouTube video_id: exactly 11 chars of [A-Za-z0-9_-].  Validating this before
 # building the URL guarantees yt-dlp only ever receives a YouTube watch URL.
 _VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
-# Format ids can carry an audio-track suffix (e.g. visionos returns 251-0,
-# 251-1 for multi-track videos).  The leading digits are the itag.
+# Format ids can carry an audio-track suffix (e.g. multi-track clients return
+# 251-0, 251-1).  The leading digits are the itag.
 _ITAG_PREFIX_RE = re.compile(r"^(\d+)")
 
 # Only these headers from yt-dlp are forwarded to the CDN by the audio relay
@@ -703,6 +753,7 @@ def _extract_formats(
     should_stop: Optional[Callable[[], bool]] = None,
 ) -> list[dict]:
     """Run yt-dlp for one client set and return its format list."""
+    _cleanup_player_cache()
     url = f"https://www.youtube.com/watch?v={video_id}"
     ydl_class = _extraction_ydl_class(prefetch)
     _raise_if_stopped(should_stop)
@@ -858,8 +909,8 @@ def _resolve_parallel(
     format; if every set is gated, we merge their formats and wait for the
     earliest gate, but never longer than *max_gate_wait*.
 
-    *initial_formats* are formats from an earlier cheap pass (the no-JS
-    visionos client).  They are merged so an already-gated duplicate can still
+    *initial_formats* are formats from an earlier fast pass (web +
+    web_embedded).  They are merged so an already-gated duplicate can still
     win, and *deadline* shares the tap's total extraction budget with that
     earlier pass.
     """
@@ -961,12 +1012,14 @@ def _resolve_tap(
     max_gate_wait: float = _MAX_TAP_GATE_WAIT,
 ) -> Tuple[str, Dict[str, str]]:
     """
-    Resolve an interactive tap with the cheapest client first.
+    Resolve an interactive tap with one combined, cache-friendly pass.
 
-    The visionos client returns already-signed audio-only URLs without an
-    n/sig challenge, so this pass does not start Deno.  When it has no format
-    usable within ``_MAX_AVAILABILITY_WAIT``, fall back to the client race and
-    merge both result sets so a gated visionos duplicate can still win.
+    web contributes the muxed itag 18 that is usually gate-free; web_embedded
+    contributes audio-only 251/140.  yt-dlp downloads the player once and solves
+    all n/sig challenges in one Deno process, and the preprocessed player cache
+    makes that solve cheap after the first track for a player version.  When the
+    pass has no format usable within ``_MAX_AVAILABILITY_WAIT``, fall back to
+    the client race and merge both result sets.
     """
     started = time.perf_counter()
     deadline = started + _MAX_TAP_EXTRACT_WAIT
