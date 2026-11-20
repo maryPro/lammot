@@ -1,9 +1,9 @@
 # LammotBot — Architecture
 
 **Telegram Mini App Music Player**
-Version: 1.3 | Stack: Python + FastAPI + SQLite + HTML/CSS/JS | Deploy: Docker on Railway
+Version: 1.4 | Stack: Python + FastAPI + SQLite + HTML/CSS/JS | Deploy: Docker on Railway
 
-Last verified against: `PR #27` (2026-11-20)
+Last verified against: `PR #28` (2026-11-20)
 Project status: [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)
 
 ---

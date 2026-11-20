@@ -1,7 +1,7 @@
 # Lammot — Project Status
 
 Last updated: 2026-11-20
-Verified against: `PR #27` (2026-11-20)
+Verified against: `PR #28` (2026-11-20)
 Maintained by: Project Manager / Architect
 
 > Read this first for current state. Use [ARCHITECTURE.md](../ARCHITECTURE.md)
@@ -23,7 +23,6 @@ Maintained by: Project Manager / Architect
 | Task | Owner | State | Next step | Updated |
 |---|---|---|---|---|
 | Search-prefetch latency and log-hygiene fix (`PREFETCH-001`, `PREFETCH-002`) | Developer (fix-prefetch worktree) | Follow-up implemented, tests green; pending deploy/verification | Deploy and repeat the production-timing check | 2026-11-20 |
-| Parallel prefetch of top-3 search results (`SEARCH_PREFETCH_PARALLEL`) | Developer (parallel-prefetch worktree) | Implemented with red/green tests; flag defaults off | Enable the flag in Railway and measure `search_prefetch resolved`, `bot_check`, memory, and tap `resolve_ms` | 2026-11-20 |
 
 ## Known bugs
 
@@ -53,6 +52,7 @@ Maintained by: Project Manager / Architect
 | 2026-11-20 | Implementation work stays off `main` and follows the documented TDD cycle | Keep `main` deployable and prove every fix with a regression test | `AGENTS.md`, PR #22 |
 | 2026-11-20 | Prefetch settle is interruptible and defaults to 1 s; a background prefetch does not wait for a per-key lock already held by a tap | Production logs showed the final track's prefetch 3.4 s behind a stale job while the tap cold-resolved for 4.3 s | `app/prefetch.py`, `app/resolver.py`, Railway logs 17:54 |
 | 2026-11-20 | Search is explicit-submit only; typing does not call `/api/search` or start prefetch | Intermediate keystroke queries enqueued unnecessary prefetch work and could delay the final query | `frontend/search-query.js`, `frontend/app.js`, PR #27 |
+| 2026-11-20 | Top search results prefetch in parallel behind `SEARCH_PREFETCH_PARALLEL=1`: three workers, no settle, three prefetch slots plus one tap slot, audio-only client set first | Sequential warm-up took 14–22 s for three results and a 5 s tap waited for the first in-flight resolve | `app/prefetch.py`, `app/resolver.py`, PR #28 |
 
 ## Recently completed
 
@@ -64,9 +64,12 @@ Maintained by: Project Manager / Architect
 | 2026-11-17 | Ignore doubled iOS media duration and end tracks on time | `f2e5d4f` (#21) |
 | 2026-11-20 | Multi-agent workflow and TDD rules in `AGENTS.md` | `1056314` (#22) |
 | 2026-11-20 | Explicit-submit search: no search or prefetch while typing | PR #27 |
+| 2026-11-20 | Parallel prefetch of top-3 search results behind a flag | PR #28 |
 
 ## Next up
 
+- Enable `SEARCH_PREFETCH_PARALLEL=1` in Railway and watch `search_prefetch
+  resolved`, `bot_check`, container memory, and tap `resolve_ms`.
 - Fix `PREFETCH-001`: stale in-flight prefetch and extraction-slot contention.
 - Fix `PREFETCH-002`: concurrent cookie writes during yt-dlp extraction.
 - Reduce log noise: expected INFO must not appear as Railway `[err]`.
