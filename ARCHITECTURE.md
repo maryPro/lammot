@@ -38,7 +38,9 @@ Key behaviors spread across backend and client:
   a warm resolver cache. A newer search from the same user supersedes older
   queued prefetches. The Mini App calls `/api/search` only on explicit submit
   (Enter or the keyboard Search action); typing alone does not trigger search
-  or prefetch.
+  or prefetch. With `SEARCH_PREFETCH_PARALLEL=1` the top results are warmed by
+  three concurrent workers (no settle window), each with its own extraction
+  slot, while one resolve/extract slot stays reserved for a user tap.
 - **Client-side prefetch of the next queue track** — the frontend asks for the
   next track's stream about 15 seconds before the current one ends.
 - **Opus/AAC selection on the client** — `frontend/audio-format.js` chooses the
@@ -157,15 +159,18 @@ YouTube assigns a pre-roll gate per player response and exposes it as
 
 - One `threading.Lock` per cache key, so concurrent `/api/stream` and `/audio`
   requests for the same track share one extraction.
-- `_RESOLVE_SEMAPHORE` limits interactive resolves (default 2,
-  `YTDLP_RESOLVE_CONCURRENCY`).
+- `_RESOLVE_SEMAPHORE` limits interactive resolves (default 2, or 4 when
+  `SEARCH_PREFETCH_PARALLEL=1`; `YTDLP_RESOLVE_CONCURRENCY`).
 - `_EXTRACT_SEMAPHORE` limits all yt-dlp extractions, including the serial
-  canary and cookie validation (default 3, `YTDLP_EXTRACT_CONCURRENCY`).
+  canary and cookie validation (default 3, or 4 when
+  `SEARCH_PREFETCH_PARALLEL=1`; `YTDLP_EXTRACT_CONCURRENCY`).
 - `_EXTRACT_POOL` bounds background extraction threads.
 - `_CANARY_SEMAPHORE` gives the canary its own single slot.
-- `_PREFETCH_GUARD` allows at most one prefetch to occupy a resolve slot.
-  Other prefetches wait without taking a slot, so a user tap is never queued
-  behind background work.
+- `_PREFETCH_GUARD` allows at most one prefetch to occupy a resolve slot
+  (three in parallel mode). Other prefetches wait without taking a slot, so a
+  user tap is never queued behind background work.
+- `_PREFETCH_EXTRACT_SEMAPHORE` gives prefetch its own extraction budget (one
+  slot, or three in parallel mode) on top of the global cap.
 - `YTDLP_MIN_RESOLVE_INTERVAL` optionally paces extractions.
 - `app/main.py` keeps a shared `httpx.AsyncClient` and warms the CDN with a
   1-byte Range request after `/api/stream` answers.

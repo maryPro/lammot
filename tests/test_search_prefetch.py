@@ -451,3 +451,70 @@ async def test_same_signature_is_allowed_after_dedupe_window():
     finally:
         await prefetcher.stop()
 
+
+# ------------------------------------------------ parallel prefetch workers
+async def test_parallel_workers_start_three_tasks():
+    async def resolve(video_id, fmt, should_stop=None):
+        return "https://cdn.example/audio", {}
+
+    prefetcher = _prefetcher(resolve, workers=3)
+    await prefetcher.start()
+    try:
+        assert len(prefetcher._tasks) == 3
+    finally:
+        await prefetcher.stop()
+
+
+async def test_parallel_workers_run_three_jobs_concurrently():
+    """All top results must warm at once, not one after another."""
+    started = []
+    all_started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def resolve(video_id, fmt, should_stop=None):
+        started.append(video_id)
+        if len(started) >= 3:
+            all_started.set()
+        await release.wait()
+        return "https://cdn.example/audio", {}
+
+    prefetcher = _prefetcher(resolve, workers=3)
+    await prefetcher.start()
+    try:
+        prefetcher.enqueue_results(_results(VID, VID2, VID3), "opus")
+        await asyncio.wait_for(all_started.wait(), 1)
+        assert sorted(started) == sorted([VID, VID2, VID3])
+    finally:
+        release.set()
+        await asyncio.wait_for(prefetcher._queue.join(), 1)
+        await prefetcher.stop()
+
+
+async def test_parallel_worker_cancels_superseded_inflight_job():
+    """A new search must stop an in-flight prefetch, not just queued ones."""
+    cancelled = asyncio.Event()
+    resolved = []
+
+    async def resolve(video_id, fmt, should_stop=None):
+        if video_id == VID:
+            while not (should_stop and should_stop()):
+                await asyncio.sleep(0.01)
+            cancelled.set()
+            raise resolver.PrefetchCancelled("superseded")
+        resolved.append(video_id)
+        return "https://cdn.example/audio", {}
+
+    prefetcher = _prefetcher(resolve, workers=3)
+    await prefetcher.start()
+    try:
+        prefetcher.enqueue_results(_results(VID), "opus", owner=1)
+        await asyncio.sleep(0.05)
+        prefetcher.enqueue_results(_results(VID2), "opus", owner=1)
+        await asyncio.wait_for(cancelled.wait(), 1)
+        await asyncio.wait_for(prefetcher._queue.join(), 1)
+    finally:
+        await prefetcher.stop()
+
+    assert resolved == [VID2]
+
+

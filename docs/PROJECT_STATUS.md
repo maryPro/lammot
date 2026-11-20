@@ -15,12 +15,15 @@ Maintained by: Project Manager / Architect
   `api_stream resolve_ms` and `audio_relay first_chunk_ms`.
 - Search is now explicit-submit only: typing no longer calls `/api/search` or
   starts prefetch.
+- Parallel prefetch mode (`SEARCH_PREFETCH_PARALLEL=1`) warms the top three
+  results concurrently; watch bot checks, container memory, and tap latency.
 
 ## In progress
 
 | Task | Owner | State | Next step | Updated |
 |---|---|---|---|---|
 | Search-prefetch latency and log-hygiene fix (`PREFETCH-001`, `PREFETCH-002`) | Developer (fix-prefetch worktree) | Follow-up implemented, tests green; pending deploy/verification | Deploy and repeat the production-timing check | 2026-11-20 |
+| Parallel prefetch of top-3 search results (`SEARCH_PREFETCH_PARALLEL`) | Developer (parallel-prefetch worktree) | Implemented with red/green tests; flag defaults off | Enable the flag in Railway and measure `search_prefetch resolved`, `bot_check`, memory, and tap `resolve_ms` | 2026-11-20 |
 
 ## Known bugs
 
@@ -38,6 +41,7 @@ Maintained by: Project Manager / Architect
 | In-memory cache, rate limiter, and resolver state require a single process | Multiple replicas would split state, multiply yt-dlp load, and contend on SQLite | Keep one replica, or redesign shared state before scaling out | 2026-11-20 |
 | Resolver depends on Deno and a fresh `yt-dlp` | YouTube changes can break resolution until dependencies are updated | Keep `yt-dlp[default]` and Deno current; watch the canary and `/health` | 2026-11-20 |
 | Cold yt-dlp extraction is roughly 2.7–5.4 s in production | A cold track cannot reliably start in under one second; only a completed prefetch or cache hit can | Set expectations from measured p50/p90, not a fixed “instant” promise | 2026-11-20 |
+| Parallel prefetch raises the extract/resolve cap to 4 (3 prefetch + 1 tap) | Four concurrent yt-dlp/Deno processes may increase container memory and bot-check risk | Watch memory and `bot_check`; set `SEARCH_PREFETCH_PARALLEL=0` to roll back | 2026-11-20 |
 
 ## Recent decisions
 

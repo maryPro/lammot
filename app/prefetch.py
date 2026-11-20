@@ -73,6 +73,7 @@ class SearchPrefetcher:
         queue_size: int = 12,
         settle_seconds: float = 1.0,
         dedupe_seconds: float = 1.0,
+        workers: int = 1,
     ) -> None:
         self._resolve = resolve
         self._warm = warm
@@ -80,6 +81,7 @@ class SearchPrefetcher:
         self._top_n = max(1, int(top_n))
         self._settle_seconds = max(0.0, float(settle_seconds))
         self._dedupe_seconds = max(0.0, float(dedupe_seconds))
+        self._workers = max(1, int(workers))
         self._queue: asyncio.Queue[PrefetchJob] = asyncio.Queue(
             maxsize=max(1, int(queue_size))
         )
@@ -93,7 +95,12 @@ class SearchPrefetcher:
         # arrives, so a stale job does not hold the only worker for its full
         # settle time.
         self._wake = asyncio.Event()
-        self._task: Optional[asyncio.Task] = None
+        self._tasks: List[asyncio.Task] = []
+
+    @property
+    def _task(self) -> Optional[asyncio.Task]:
+        """First worker task, kept for callers that inspect the single worker."""
+        return self._tasks[0] if self._tasks else None
 
     def enqueue_results(
         self,
@@ -191,21 +198,25 @@ class SearchPrefetcher:
         return enqueued
 
     async def start(self) -> None:
-        if self._task is None or self._task.done():
-            self._task = asyncio.create_task(self._run(), name="search-prefetch")
+        if any(not task.done() for task in self._tasks):
+            return
+        self._tasks = [
+            asyncio.create_task(self._run(), name=f"search-prefetch-{index}")
+            for index in range(self._workers)
+        ]
 
     async def stop(self) -> None:
-        task = self._task
-        if task is None:
-            return
-        self._task = None
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            logger.exception("search_prefetch worker failed")
+        tasks = self._tasks
+        self._tasks = []
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("search_prefetch worker failed")
 
     def _release(self, job: PrefetchJob) -> None:
         key = (job.video_id, job.format)
