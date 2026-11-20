@@ -1054,6 +1054,7 @@
   // later track and prefetch asks for it instead of paying a second resolve.
   let preferredFormat = AUDIO_FORMAT;
   const { pickDuration, positionState, progressRatio, shouldForceTrackEnd } = window.LammotTime;
+  const PlaybackView = window.LammotPlaybackView;
 
   // A play() call made directly inside a tap "unlocks" the <audio> element;
   // after that, play() also works after awaiting the network (next songs,
@@ -1089,6 +1090,7 @@
     prefetchedFor: null,
     botCheck: false,
     loading: false,
+    playing: false,
     seeking: false,
     forcedEnd: false,
   };
@@ -1164,6 +1166,7 @@
     player.loading = on;
     $('mini-player').classList.toggle('is-loading', on);
     $('full-player').classList.toggle('is-loading', on);
+    renderPlayState();
   }
 
   async function startTrack(track, { remember = true } = {}) {
@@ -1177,6 +1180,7 @@
     player.current = track;
     player.recorded = false;
     player.forcedEnd = false;
+    player.playing = false;
     player.format = preferredFormat;
     player.triedFallback = false;
     player.prefetchedFor = null;
@@ -1190,6 +1194,7 @@
       if (seq !== player.loadSeq) return;
       audio.src = url;
       await audio.play();
+      if (seq === player.loadSeq) player.playing = true;
       player.failedInRow = 0;
       player.botCheck = false;
     } catch (err) {
@@ -1252,6 +1257,7 @@
         audio.src = url;
         if (at) audio.currentTime = at;
         await audio.play();
+        if (seq === player.loadSeq) player.playing = true;
         // Only a stream that actually plays may change the session format
         if (persistFormat) preferredFormat = 'aac';
         return true;
@@ -1274,6 +1280,8 @@
 
   async function onMediaError() {
     if (!player.current || !audio.src || isSilent()) return;
+    player.playing = false;
+    renderPlayState();
     const seq = player.loadSeq;
     // Some webviews claim WebM/Opus support but fail: retry once as AAC.
     // Network/decode failures retry too, but must not pin the session format.
@@ -1364,7 +1372,7 @@
   }
 
   function togglePlay() {
-    if (!player.current) return;
+    if (!player.current || player.loading) return;
     if (audio.paused) {
       if (!audio.src || isSilent()) { startTrack(player.current, { remember: false }); return; }
       audio.play().catch(() => {});
@@ -1413,12 +1421,24 @@
   }
 
   function renderPlayState() {
-    const playing = !audio.paused && !audio.ended && !isSilent();
+    const state = PlaybackView.playbackUiState({
+      loading: player.loading,
+      playing: player.playing,
+    });
+    const playing = state === 'playing';
+    const loading = state === 'loading';
+    const busy = PlaybackView.isPlaybackBusy(state);
+    const label = PlaybackView.playbackAriaLabel(state);
     $('mini-player').classList.toggle('is-playing', playing);
     $('full-player').classList.toggle('is-playing', playing);
-    const label = playing ? 'Pause' : 'Play';
-    $('mini-play').setAttribute('aria-label', label);
-    $('fp-play').setAttribute('aria-label', label);
+    $('mini-player').classList.toggle('is-loading', loading);
+    $('full-player').classList.toggle('is-loading', loading);
+    for (const id of ['mini-play', 'fp-play']) {
+      const button = $(id);
+      button.setAttribute('aria-label', label);
+      button.setAttribute('aria-busy', busy ? 'true' : 'false');
+      button.setAttribute('aria-disabled', busy ? 'true' : 'false');
+    }
     try {
       if ('mediaSession' in navigator) navigator.mediaSession.playbackState = playing ? 'playing' : 'paused';
     } catch (_) { /* ignore */ }
@@ -1632,12 +1652,15 @@
 
     audio.addEventListener('play', renderPlayState);
     audio.addEventListener('pause', () => {
+      player.playing = false;
       renderPlayState();
       syncMediaSessionPosition(true);
     });
     audio.addEventListener('playing', () => {
-      renderPlayState();
       if (isSilent()) return;
+      player.playing = true;
+      setLoading(false);
+      renderPlayState();
       // iOS ignores next/previous handlers registered before playback is
       // active and shows its own ±10 s seek buttons instead.  Register them
       // again now that the session is active.
@@ -1679,7 +1702,11 @@
       });
     }
     audio.addEventListener('seeked', () => syncMediaSessionPosition(true));
-    audio.addEventListener('ended', () => { if (!isSilent()) next({ auto: true }); });
+    audio.addEventListener('ended', () => {
+      if (isSilent()) return;
+      player.playing = false;
+      next({ auto: true });
+    });
     audio.addEventListener('error', onMediaError);
 
     doc.addEventListener('keydown', (e) => {

@@ -1,9 +1,9 @@
 # LammotBot — UI Specification
 
 **Telegram Mini App | Language: English**
-Version: 1.2
+Version: 1.3
 
-Last verified against: `PR #27` (2026-11-20)
+Last verified against: worktree `remove-pause` (pending merge, 2026-11-21) (2026-11-21)
 Project status: [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)
 
 ---
@@ -244,8 +244,9 @@ Appears above the bottom bar once a track is loaded. Height: `--mini-h` (64 px).
 
 - Tap the info area → opens the Full-Screen Player.
 - Controls: previous, play/pause, next.
-- Play/pause icon reflects the player state; the play button is dimmed while
-  loading.
+- Play/pause icon reflects the player state. While loading, the play button
+  shows a spinner and hides both Play and Pause icons; Pause appears only after
+  actual playback starts.
 - Thumbnail: 40×40 px, rounded 6 px.
 
 ### 2.7 Full-Screen Player
@@ -278,8 +279,10 @@ Appears above the bottom bar once a track is loaded. Height: `--mini-h` (64 px).
 - Source label shows `Radio: similar songs`, `From Favorites`, or
   `From <playlist>`.
 - States:
-  - **Loading** — the play button is dimmed while the stream resolves.
-  - **Paused** — the play icon is shown, artwork scales down slightly.
+  - **Loading** — a spinner in the play button; no Pause; the button is
+    `aria-busy`.
+  - **Playing** — active Pause.
+  - **Paused** — active Play; artwork scales down slightly.
   - **Error** — a toast explains the failure; failed tracks skip automatically.
   - **Finding similar songs…** — shown in the queue area while radio refills.
   - **Nothing queued.** — shown when there is no upcoming track.
@@ -399,6 +402,11 @@ a no-op (pressing Try again after an error retries).
 5. The recipient opens the Mini App and sees the read-only Shared Playlist
    screen.
 
+### Playback state
+
+The play/pause icon is driven by the actual `playing` event, never by the
+earlier `play` event.
+
 ---
 
 ## 4. Telegram-Specific APIs
@@ -512,7 +520,7 @@ widget shows about twice the real track length. Position is re-synced on
 - The full-screen player is a `role="dialog"` with `aria-modal="true"`.
 - The sheet and full-screen player return focus/navigation through the Telegram
   Back button; Escape triggers the same back behavior.
-- States covered by the UI: loading (spinner or dimmed controls), empty,
+- States covered by the UI: loading (spinner in the play button), empty,
   error (with retry where applicable), offline (“No connection…”), and
   bot-check (“Music service is temporarily unavailable”).
 - Outside Telegram, the home screen shows an “Open Lammot in Telegram” message
