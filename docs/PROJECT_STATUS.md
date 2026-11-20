@@ -1,7 +1,7 @@
 # Lammot — Project Status
 
 Last updated: 2026-11-20
-Verified against: `PR #28` (2026-11-20)
+Verified against: `cold-start` branch (pending PR)
 Maintained by: Project Manager / Architect
 
 > Read this first for current state. Use [ARCHITECTURE.md](../ARCHITECTURE.md)
@@ -11,8 +11,12 @@ Maintained by: Project Manager / Architect
 
 ## Current focus
 
+- Cold-start reduction: taps and prefetch now ask the no-JS `visionos` client
+  first, so a normal track resolves without starting Deno. The Deno-capable
+  client race is only a fallback.
 - Verify `PREFETCH-001`/`PREFETCH-002` in production after deploy: check
-  `api_stream resolve_ms` and `audio_relay first_chunk_ms`.
+  `api_stream resolve_ms`, `audio_relay first_chunk_ms`, and whether Deno runs
+  for normal tracks.
 - Search is now explicit-submit only: typing no longer calls `/api/search` or
   starts prefetch.
 - Parallel prefetch mode (`SEARCH_PREFETCH_PARALLEL=1`) warms the top three
@@ -22,6 +26,7 @@ Maintained by: Project Manager / Architect
 
 | Task | Owner | State | Next step | Updated |
 |---|---|---|---|---|
+| Cold-start fast path (`cold-start`) | Developer (cold-start worktree) | Implemented, tests green; pending deploy/verification | Deploy and compare `resolve_ms` for fast vs fallback clients | 2026-11-20 |
 | Search-prefetch latency and log-hygiene fix (`PREFETCH-001`, `PREFETCH-002`) | Developer (fix-prefetch worktree) | Follow-up implemented, tests green; pending deploy/verification | Deploy and repeat the production-timing check | 2026-11-20 |
 
 ## Known bugs
@@ -39,7 +44,8 @@ Maintained by: Project Manager / Architect
 | `stream_cache` and `track_resolution` exist in SQLite but are unused | Schema contains dead tables and unused helper functions | Decide whether to remove them or wire up a persistent cache | 2026-11-20 |
 | In-memory cache, rate limiter, and resolver state require a single process | Multiple replicas would split state, multiply yt-dlp load, and contend on SQLite | Keep one replica, or redesign shared state before scaling out | 2026-11-20 |
 | Resolver depends on Deno and a fresh `yt-dlp` | YouTube changes can break resolution until dependencies are updated | Keep `yt-dlp[default]` and Deno current; watch the canary and `/health` | 2026-11-20 |
-| Cold yt-dlp extraction is roughly 2.7–5.4 s in production | A cold track cannot reliably start in under one second; only a completed prefetch or cache hit can | Set expectations from measured p50/p90, not a fixed “instant” promise | 2026-11-20 |
+| Cold Deno fallback extraction is still roughly 2.7–5.4 s in production | Gated or multi-track videos that miss the no-JS pass can still be slow; only a completed prefetch or cache hit avoids it | Measure the fast-path hit rate and keep the fallback race as a safety net | 2026-11-20 |
+| The no-JS fast path uses the yt-dlp `visionos` client and marks it cookie-capable | yt-dlp may rename or remove the client; the fallback race must keep working | Keep `yt-dlp[default]` fresh and watch `clients=fast(visionos)` vs `clients=parallel(...)` in logs | 2026-11-20 |
 | Parallel prefetch raises the extract/resolve cap to 4 (3 prefetch + 1 tap) | Four concurrent yt-dlp/Deno processes may increase container memory and bot-check risk | Watch memory and `bot_check`; set `SEARCH_PREFETCH_PARALLEL=0` to roll back | 2026-11-20 |
 
 ## Recent decisions
@@ -53,6 +59,7 @@ Maintained by: Project Manager / Architect
 | 2026-11-20 | Prefetch settle is interruptible and defaults to 1 s; a background prefetch does not wait for a per-key lock already held by a tap | Production logs showed the final track's prefetch 3.4 s behind a stale job while the tap cold-resolved for 4.3 s | `app/prefetch.py`, `app/resolver.py`, Railway logs 17:54 |
 | 2026-11-20 | Search is explicit-submit only; typing does not call `/api/search` or start prefetch | Intermediate keystroke queries enqueued unnecessary prefetch work and could delay the final query | `frontend/search-query.js`, `frontend/app.js`, PR #27 |
 | 2026-11-20 | Top search results prefetch in parallel behind `SEARCH_PREFETCH_PARALLEL=1`: three workers, no settle, three prefetch slots plus one tap slot, audio-only client set first | Sequential warm-up took 14–22 s for three results and a 5 s tap waited for the first in-flight resolve | `app/prefetch.py`, `app/resolver.py`, PR #28 |
+| 2026-11-20 | Taps and prefetch try the `visionos` client first (no n/sig challenge, no Deno); the Deno client race is only a fallback | Cold resolves were dominated by Deno startup and player analysis; visionos returned playable audio-only 251/140 in ~1.3 s locally | `app/resolver.py`, `tests/test_resolver.py` |
 
 ## Recently completed
 
@@ -65,9 +72,12 @@ Maintained by: Project Manager / Architect
 | 2026-11-20 | Multi-agent workflow and TDD rules in `AGENTS.md` | `1056314` (#22) |
 | 2026-11-20 | Explicit-submit search: no search or prefetch while typing | PR #27 |
 | 2026-11-20 | Parallel prefetch of top-3 search results behind a flag | PR #28 |
+| 2026-11-20 | No-JS `visionos` fast path for taps/prefetch; suffixed itag support | `cold-start` branch (pending PR) |
 
 ## Next up
 
+- Deploy the `cold-start` branch and compare `api_stream resolve_ms` for
+  `clients=fast(visionos)` vs the Deno `clients=parallel(...)` fallback.
 - Enable `SEARCH_PREFETCH_PARALLEL=1` in Railway and watch `search_prefetch
   resolved`, `bot_check`, container memory, and tap `resolve_ms`.
 - Fix `PREFETCH-001`: stale in-flight prefetch and extraction-slot contention.

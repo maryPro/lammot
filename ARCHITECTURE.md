@@ -139,18 +139,30 @@ passes it as `?format=opus|aac`.
 YouTube assigns a pre-roll gate per player response and exposes it as
 `available_at`; the CDN answers 403 before that moment. The resolver:
 
-- `_resolve_parallel()` races several client sets for taps and prefetch:
-  `("web",)`, `("web_embedded", "default")`, `("web_embedded",)`. The first set
-  that yields a usable format wins, which often avoids a long gate because a
-  different client receives an ungated duplicate. The extraction race is capped
-  by `_MAX_TAP_EXTRACT_WAIT` (12 s).
-- If every set is gated, their formats are merged and the earliest gate is
-  waited for, bounded by `_MAX_TAP_GATE_WAIT` (3 s).
+- `_resolve_tap()` is the interactive path. It first asks the `visionos`
+  client (`_TAP_FAST_CLIENTS`), which returns already-signed audio-only URLs
+  (itags 251/140) without an n/sig challenge. This pass does not start Deno and
+  is the normal cold start. Format ids with an audio-track suffix (`251-0`) are
+  matched by their leading itag. `YTDLP_PLAYER_CLIENTS` overrides this first
+  pass, which is the operational escape hatch.
+- If the visionos pass has no format usable within `_MAX_AVAILABILITY_WAIT`
+  (2 s), `_resolve_parallel()` runs the fallback race over `("web",)`,
+  `("web_embedded", "default")` and `("web_embedded",)`. The first set that
+  yields a usable format wins, which often avoids a long gate because a
+  different client receives an ungated duplicate. Formats from both passes are
+  merged. The race is capped by `_MAX_TAP_EXTRACT_WAIT` (12 s, shared with the
+  visionos pass).
+- If every set is gated, the earliest gate is waited for, bounded by
+  `_MAX_TAP_GATE_WAIT` (3 s).
+- yt-dlp normally drops `visionos` when a logged-in cookies file is configured
+  because the client is marked as not supporting cookies. The resolver marks it
+  as cookie-capable; if the client still fails, the race runs.
 - `_resolve_serial()` is the serial path used by the canary and cookie
   validation (`dedicated=True`): try the configured first-pass client(s)
   (`YTDLP_PLAYER_CLIENTS`, default `web`), then one fallback pass with
   `("web_embedded", "default")` when the first pass has no format usable within
-  `_MAX_AVAILABILITY_WAIT` (2 s).
+  `_MAX_AVAILABILITY_WAIT` (2 s). Cookie validation stays on a cookie-capable
+  client.
 - `_wait_until_available()` sleeps for the remaining gate. A gate longer than
   the allowed wait raises `TransientResolveError`, not `UnavailableError`, so
   the track is not negative-cached.
@@ -199,10 +211,11 @@ YouTube assigns a pre-roll gate per player response and exposes it as
 
 ### Prefetch mode
 
-`get_stream_url(..., prefetch=True)` uses the same client race as a tap, but
-enters `_PREFETCH_GUARD` before taking a resolve slot. A tap starts its own
-interactive request instead of joining a background warm-up, so the tap never
-waits for queued prefetch work.
+`get_stream_url(..., prefetch=True)` uses the sequential prefetch path and
+starts with the no-JS `visionos` client, so a warm-up normally costs one
+extraction and no Deno process. It enters `_PREFETCH_GUARD` before taking a
+resolve slot. A tap starts its own interactive request instead of joining a
+background warm-up, so the tap never waits for queued prefetch work.
 
 ---
 
