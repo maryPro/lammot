@@ -1,7 +1,7 @@
 # Lammot — Project Status
 
 Last updated: 2026-11-20
-Verified against: `cold-start` branch (pending PR)
+Verified against: `fix-system-widget-player-ios` branch (pending PR)
 Maintained by: Project Manager / Architect
 
 > Read this first for current state. Use [ARCHITECTURE.md](../ARCHITECTURE.md)
@@ -65,6 +65,7 @@ Maintained by: Project Manager / Architect
 | 2026-11-20 | Top search results prefetch in parallel behind `SEARCH_PREFETCH_PARALLEL=1`: three workers, no settle, three prefetch slots plus one tap slot, audio-only client set first | Sequential warm-up took 14–22 s for three results and a 5 s tap waited for the first in-flight resolve | `app/prefetch.py`, `app/resolver.py`, PR #28 |
 | 2026-11-20 | Taps/prefetch use `web + web_embedded` in one extraction and enable the preprocessed player cache; visionos is not usable from the Railway IP | Production diagnostics: visionos returns HTTP 400 with cookies and bot-check without; web_embedded works but re-analyzes the player every track. With the cache, tracks resolve in ~1.7–2.4 s | `app/resolver.py`, `tests/test_resolver.py` |
 | 2026-11-20 | Taps race the combined fast set with fallbacks from the start; `_MAX_TAP_GATE_WAIT` raised to 5 s; parallel prefetch disabled in production | A gated fast pass made taps wait 4.6–5.1 s, and parallel prefetch pushed the first tapped track to 6.6 s + gate. The race returns ~2–2.9 s; 5 s covers observed 4–5 s gates | `app/resolver.py`, `tests/test_resolver.py`, Railway logs 23:10 |
+| 2026-11-20 | iOS lock screen uses previous/next, and the system timeline is fed by `setPositionState` with the metadata duration | iOS ignores action handlers registered before playback starts and otherwise uses its doubled media duration; `seekbackward`/`seekforward` would replace prev/next | `frontend/app.js`, `frontend/player-time.js`, `tests/js/player-time.test.js` |
 
 ## Recently completed
 
@@ -78,6 +79,7 @@ Maintained by: Project Manager / Architect
 | 2026-11-20 | Explicit-submit search: no search or prefetch while typing | PR #27 |
 | 2026-11-20 | Parallel prefetch of top-3 search results behind a flag | PR #28 |
 | 2026-11-20 | Combined `web + web_embedded` fast path and preprocessed player cache | `cold-start` branch (pending PR) |
+| 2026-11-20 | iOS lock-screen widget: previous/next buttons and the correct track timeline | `fix-system-widget-player-ios` branch (pending PR) |
 
 ## Next up
 

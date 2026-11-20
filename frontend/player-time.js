@@ -60,8 +60,26 @@
     return Math.min(1, Math.max(0, value / total));
   }
 
+  // The system media panel (lock screen) reads position from us, so it must
+  // get the corrected track duration instead of the doubled media duration.
+  // Returns null when there is nothing meaningful to report.
+  function positionState(duration, position, playbackRate) {
+    var total = positive(duration);
+    if (!total) return null;
+
+    var pos = Number(position);
+    if (!Number.isFinite(pos) || pos < 0) pos = 0;
+    if (pos > total) pos = total;
+
+    var rate = Number(playbackRate);
+    if (!Number.isFinite(rate) || rate <= 0) rate = 1;
+
+    return { duration: total, position: pos, playbackRate: rate };
+  }
+
   return {
     pickDuration: pickDuration,
+    positionState: positionState,
     progressRatio: progressRatio,
     shouldForceTrackEnd: shouldForceTrackEnd,
   };
