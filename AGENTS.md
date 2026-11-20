@@ -9,6 +9,7 @@ Lammot is a Telegram Mini App music player.
 - **Backend:** Python 3.12, FastAPI, SQLite (`aiosqlite`), `ytmusicapi`, `yt-dlp`.
 - **Frontend:** `frontend/index.html`, `frontend/style.css`, `frontend/app.js` (vanilla JS, no frameworks).
 - **Entry Point:** `app/main.py`. Architecture: `ARCHITECTURE.md`. UI Spec: `UI_SPEC.md`.
+- **Project status:** `docs/PROJECT_STATUS.md` — read this first for current tasks, known issues, and recent decisions.
 - **Deployment:** Docker on Railway auto-deployed from `main`.
 
 ## Commands
