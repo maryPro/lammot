@@ -139,24 +139,29 @@ passes it as `?format=opus|aac`.
 YouTube assigns a pre-roll gate per player response and exposes it as
 `available_at`; the CDN answers 403 before that moment. The resolver:
 
-- `_resolve_tap()` is the interactive path. It first asks the `visionos`
-  client (`_TAP_FAST_CLIENTS`), which returns already-signed audio-only URLs
-  (itags 251/140) without an n/sig challenge. This pass does not start Deno and
-  is the normal cold start. Format ids with an audio-track suffix (`251-0`) are
-  matched by their leading itag. `YTDLP_PLAYER_CLIENTS` overrides this first
-  pass, which is the operational escape hatch.
-- If the visionos pass has no format usable within `_MAX_AVAILABILITY_WAIT`
-  (2 s), `_resolve_parallel()` runs the fallback race over `("web",)`,
-  `("web_embedded", "default")` and `("web_embedded",)`. The first set that
-  yields a usable format wins, which often avoids a long gate because a
-  different client receives an ungated duplicate. Formats from both passes are
-  merged. The race is capped by `_MAX_TAP_EXTRACT_WAIT` (12 s, shared with the
-  visionos pass).
+- `_resolve_tap()` is the interactive path. It asks `web` and `web_embedded`
+  in one yt-dlp extraction: `web` contributes the muxed itag 18 that is usually
+  gate-free, and `web_embedded` contributes audio-only 251/140. yt-dlp
+  downloads the player once and solves all n/sig challenges in one Deno
+  process. Format ids with an audio-track suffix (`251-0`) are matched by their
+  leading itag. `YTDLP_PLAYER_CLIENTS` overrides this first pass, which is the
+  operational escape hatch.
+- The preprocessed player analysis is cached in `YTDLP_CACHE_DIR` (yt-dlp's
+  `_ENABLE_PREPROCESSED_PLAYER_CACHE`). The first track for a player version
+  pays the full analysis; later tracks only solve the new n/sig challenge.
+  `_cleanup_player_cache()` keeps the newest 3 player files (~4.4 MB each) so
+  the volume cannot fill up.
+- If the fast pass has no format usable within `_MAX_AVAILABILITY_WAIT` (2 s),
+  `_resolve_parallel()` runs the fallback race over
+  `("web_embedded", "default")`, `("web",)` and `("web_embedded",)`. The first
+  set that yields a usable format wins, which often avoids a long gate because
+  a different client receives an ungated duplicate. Formats from both passes
+  are merged. The race is capped by `_MAX_TAP_EXTRACT_WAIT` (12 s, shared with
+  the fast pass).
 - If every set is gated, the earliest gate is waited for, bounded by
-  `_MAX_TAP_GATE_WAIT` (3 s).
-- yt-dlp normally drops `visionos` when a logged-in cookies file is configured
-  because the client is marked as not supporting cookies. The resolver marks it
-  as cookie-capable; if the client still fails, the race runs.
+  `_MAX_TAP_GATE_WAIT` (3 s). When the audio-only streams are gated but the
+  muxed itag 18 is not, the resolver intentionally uses itag 18 to start
+  playback immediately.
 - `_resolve_serial()` is the serial path used by the canary and cookie
   validation (`dedicated=True`): try the configured first-pass client(s)
   (`YTDLP_PLAYER_CLIENTS`, default `web`), then one fallback pass with
@@ -212,10 +217,11 @@ YouTube assigns a pre-roll gate per player response and exposes it as
 ### Prefetch mode
 
 `get_stream_url(..., prefetch=True)` uses the sequential prefetch path and
-starts with the no-JS `visionos` client, so a warm-up normally costs one
-extraction and no Deno process. It enters `_PREFETCH_GUARD` before taking a
-resolve slot. A tap starts its own interactive request instead of joining a
-background warm-up, so the tap never waits for queued prefetch work.
+starts with the same `web + web_embedded` pass, so a warm-up normally costs one
+extraction and reuses the preprocessed player cache. It enters
+`_PREFETCH_GUARD` before taking a resolve slot. A tap starts its own
+interactive request instead of joining a background warm-up, so the tap never
+waits for queued prefetch work.
 
 ---
 
@@ -463,8 +469,9 @@ The working cache is an in-memory TTL dict. No Redis.
   `YTDLP_COOKIES_FILE` or `YTDLP_RESERVE_COOKIES_FILE`.
 - **Alerts** — `OWNER_TG_ID` also receives Telegram alerts on resolver state
   transitions: bot check, recovery, degradation, or cookie-account switch.
-- **yt-dlp tuning** — `YTDLP_CACHE_DIR` enables a persistent player/n-sig cache
-  (use `/data/cache` on Railway); `YTDLP_PLAYER_CLIENTS` overrides the first
+- **yt-dlp tuning** — `YTDLP_CACHE_DIR` enables the persistent preprocessed
+  player cache and n/sig cache (the Dockerfile sets `/data/cache`; the resolver
+  keeps the newest 3 player files). `YTDLP_PLAYER_CLIENTS` overrides the first
   player-client chain; `BGUTIL_BASE_URL` enables a bgutil PO-token provider
   when the plugin is installed.
 - **Volume move** — see [docs/eu-migration.md](docs/eu-migration.md) for the

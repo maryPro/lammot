@@ -15,6 +15,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     DENO_DIR=/tmp/deno \
     XDG_CACHE_HOME=/tmp/cache \
     DATABASE_PATH=/data/lammot.db \
+    # Persistent yt-dlp cache: the preprocessed player analysis is reused
+    # across tracks; app/resolver.py prunes old player versions.
+    YTDLP_CACHE_DIR=/data/cache \
     # Cap each Deno JSC solver: yt-dlp starts one Deno per JavaScript
     # challenge and up to three may run at once.  Without the cap a single
     # solver peaks around 340 MB, and three plus Python exceed the Railway
