@@ -139,29 +139,27 @@ passes it as `?format=opus|aac`.
 YouTube assigns a pre-roll gate per player response and exposes it as
 `available_at`; the CDN answers 403 before that moment. The resolver:
 
-- `_resolve_tap()` is the interactive path. It asks `web` and `web_embedded`
-  in one yt-dlp extraction: `web` contributes the muxed itag 18 that is usually
-  gate-free, and `web_embedded` contributes audio-only 251/140. yt-dlp
-  downloads the player once and solves all n/sig challenges in one Deno
+- `_resolve_tap()` is the interactive path. It races the combined
+  `web + web_embedded` set with `("web_embedded", "default")` and `("web",)`
+  from the start. `web` contributes the muxed itag 18 that is usually
+  gate-free; `web_embedded` contributes audio-only 251/140. yt-dlp downloads
+  the player once per extraction and solves all n/sig challenges in one Deno
   process. Format ids with an audio-track suffix (`251-0`) are matched by their
-  leading itag. `YTDLP_PLAYER_CLIENTS` overrides this first pass, which is the
+  leading itag. `YTDLP_PLAYER_CLIENTS` overrides the fast set, which is the
   operational escape hatch.
 - The preprocessed player analysis is cached in `YTDLP_CACHE_DIR` (yt-dlp's
   `_ENABLE_PREPROCESSED_PLAYER_CACHE`). The first track for a player version
   pays the full analysis; later tracks only solve the new n/sig challenge.
   `_cleanup_player_cache()` keeps the newest 3 player files (~4.4 MB each) so
   the volume cannot fill up.
-- If the fast pass has no format usable within `_MAX_AVAILABILITY_WAIT` (2 s),
-  `_resolve_parallel()` runs the fallback race over
-  `("web_embedded", "default")`, `("web",)` and `("web_embedded",)`. The first
-  set that yields a usable format wins, which often avoids a long gate because
-  a different client receives an ungated duplicate. Formats from both passes
-  are merged. The race is capped by `_MAX_TAP_EXTRACT_WAIT` (12 s, shared with
-  the fast pass).
+- The first set that yields a usable format wins, which often avoids a long
+  gate because a different client receives an ungated duplicate. A gated fast
+  response does not delay the fallback retry: all sets start together, and the
+  race is capped by `_MAX_TAP_EXTRACT_WAIT` (12 s).
 - If every set is gated, the earliest gate is waited for, bounded by
-  `_MAX_TAP_GATE_WAIT` (3 s). When the audio-only streams are gated but the
-  muxed itag 18 is not, the resolver intentionally uses itag 18 to start
-  playback immediately.
+  `_MAX_TAP_GATE_WAIT` (5 s; observed gates are 4-5 s). When the audio-only
+  streams are gated but the muxed itag 18 is not, the resolver intentionally
+  uses itag 18 to start playback immediately.
 - `_resolve_serial()` is the serial path used by the canary and cookie
   validation (`dedicated=True`): try the configured first-pass client(s)
   (`YTDLP_PLAYER_CLIENTS`, default `web`), then one fallback pass with

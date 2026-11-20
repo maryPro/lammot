@@ -11,18 +11,19 @@ Maintained by: Project Manager / Architect
 
 ## Current focus
 
-- Cold-start reduction: taps and prefetch ask `web + web_embedded` in one
-  yt-dlp extraction (gate-free muxed 18 plus audio-only 251/140). The
+- Cold-start reduction: taps race the combined `web + web_embedded` set with
+  fallbacks from the start (gate-free muxed 18 plus audio-only 251/140). The
   preprocessed player cache is enabled on the persistent volume, so later
-  tracks only solve the new n/sig challenge. The Deno client race is only a
-  fallback.
+  tracks only solve the new n/sig challenge. A gated fast response no longer
+  delays the fallback retry.
 - Verify in production after deploy: check `api_stream resolve_ms` for
-  `clients=fast(web,web_embedded)` vs `clients=parallel(...)`, and whether the
+  `clients=parallel(web,web_embedded)` vs `parallel(web)`, and whether the
   player cache is being reused/pruned.
 - Search is now explicit-submit only: typing no longer calls `/api/search` or
   starts prefetch.
-- Parallel prefetch mode (`SEARCH_PREFETCH_PARALLEL=1`) warms the top three
-  results concurrently; watch bot checks, container memory, and tap latency.
+- Parallel prefetch (`SEARCH_PREFETCH_PARALLEL=1`) is **off in production**:
+  three concurrent prefetches delayed the first tapped result (6.6 s + gate
+  instead of ~2-3 s). Sequential prefetch prioritizes the first result.
 
 ## In progress
 
@@ -49,7 +50,7 @@ Maintained by: Project Manager / Architect
 | First track after a player version change pays the full EJS analysis | The fast path is ~2 s for later tracks but can be ~3 s for the first one; a fresh container has no player cache | Keep the cache on the volume; prefetch warms it after deploys | 2026-11-20 |
 | The fast pass may use muxed itag 18 when audio-only is gated | Playback starts immediately, but it relays a 360p MP4 with AAC instead of audio-only 251/140, using more bandwidth and a lower audio bitrate | Keep the `_MAX_AVAILABILITY_WAIT` trade-off; use a PO token provider if audio-only without a gate becomes available | 2026-11-20 |
 | The preprocessed player cache is ~4.4 MB per player version | Without rotation it would fill the 434 MB volume | `_cleanup_player_cache()` keeps the newest 3 files; watch volume usage and `pruned` logs | 2026-11-20 |
-| Parallel prefetch raises the extract/resolve cap to 4 (3 prefetch + 1 tap) | Four concurrent yt-dlp/Deno processes may increase container memory and bot-check risk | Watch memory and `bot_check`; set `SEARCH_PREFETCH_PARALLEL=0` to roll back | 2026-11-20 |
+| Parallel prefetch is off in production (`SEARCH_PREFETCH_PARALLEL=0`) | Enabling it makes three prefetches compete; the tapped first result can wait 6.6 s + gate instead of ~2-3 s | Keep it off; consider a staggered prefetch that starts the first result alone | 2026-11-20 |
 
 ## Recent decisions
 
@@ -63,6 +64,7 @@ Maintained by: Project Manager / Architect
 | 2026-11-20 | Search is explicit-submit only; typing does not call `/api/search` or start prefetch | Intermediate keystroke queries enqueued unnecessary prefetch work and could delay the final query | `frontend/search-query.js`, `frontend/app.js`, PR #27 |
 | 2026-11-20 | Top search results prefetch in parallel behind `SEARCH_PREFETCH_PARALLEL=1`: three workers, no settle, three prefetch slots plus one tap slot, audio-only client set first | Sequential warm-up took 14–22 s for three results and a 5 s tap waited for the first in-flight resolve | `app/prefetch.py`, `app/resolver.py`, PR #28 |
 | 2026-11-20 | Taps/prefetch use `web + web_embedded` in one extraction and enable the preprocessed player cache; visionos is not usable from the Railway IP | Production diagnostics: visionos returns HTTP 400 with cookies and bot-check without; web_embedded works but re-analyzes the player every track. With the cache, tracks resolve in ~1.7–2.4 s | `app/resolver.py`, `tests/test_resolver.py` |
+| 2026-11-20 | Taps race the combined fast set with fallbacks from the start; `_MAX_TAP_GATE_WAIT` raised to 5 s; parallel prefetch disabled in production | A gated fast pass made taps wait 4.6–5.1 s, and parallel prefetch pushed the first tapped track to 6.6 s + gate. The race returns ~2–2.9 s; 5 s covers observed 4–5 s gates | `app/resolver.py`, `tests/test_resolver.py`, Railway logs 23:10 |
 
 ## Recently completed
 
@@ -79,11 +81,11 @@ Maintained by: Project Manager / Architect
 
 ## Next up
 
-- Deploy the `cold-start` branch and compare `api_stream resolve_ms` for
-  `clients=fast(web,web_embedded)` vs the Deno `clients=parallel(...)` fallback;
-  confirm the player cache is reused and pruned on the volume.
-- Enable `SEARCH_PREFETCH_PARALLEL=1` in Railway and watch `search_prefetch
-  resolved`, `bot_check`, container memory, and tap `resolve_ms`.
+- Deploy the tap-race fix and confirm `api_stream resolve_ms` is ~2–3 s for
+  `clients=parallel(web,web_embedded)` / `parallel(web)`; confirm the player
+  cache is reused and pruned on the volume.
+- Keep `SEARCH_PREFETCH_PARALLEL=0`; revisit with a staggered prefetch that
+  starts the first result alone.
 - Fix `PREFETCH-001`: stale in-flight prefetch and extraction-slot contention.
 - Fix `PREFETCH-002`: concurrent cookie writes during yt-dlp extraction.
 - Reduce log noise: expected INFO must not appear as Railway `[err]`.
