@@ -1050,6 +1050,34 @@ class TestPrefetchExtractionPolicy:
 
         assert calls == [resolver._FAST_CLIENT_SETS[0]]
 
+    def test_parallel_prefetch_starts_with_audio_only_client_set(self, monkeypatch):
+        """Parallel mode should win one pass instead of two sequential passes."""
+        monkeypatch.setattr(resolver, "_PREFETCH_PARALLEL", True)
+        calls = []
+
+        def fake_extract(_video_id, clients, _cookiefile=None, **_kwargs):
+            calls.append(clients)
+            return _FORMATS_BOTH
+
+        with patch("app.resolver._extract_formats", side_effect=fake_extract):
+            resolver._resolve_prefetch("dQw4w9WgXcQ", "aac")
+
+        assert calls == [("web_embedded", "default")]
+
+    def test_sequential_prefetch_keeps_web_first(self, monkeypatch):
+        monkeypatch.setattr(resolver, "_PREFETCH_PARALLEL", False)
+        calls = []
+
+        def fake_extract(_video_id, clients, _cookiefile=None, **_kwargs):
+            calls.append(clients)
+            return _FORMATS_BOTH
+
+        with patch("app.resolver._extract_formats", side_effect=fake_extract):
+            resolver._resolve_prefetch("dQw4w9WgXcQ", "aac")
+
+        assert calls == [("web",)]
+
+
     def test_cancelled_prefetch_does_not_populate_cache(self):
         from app.cache import cache_get
 

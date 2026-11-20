@@ -112,13 +112,18 @@ CANARY_START_DELAY_SECONDS = max(1, _env_int("CANARY_START_DELAY_SECONDS", 15))
 COOKIE_TEST_TIMEOUT_SECONDS = max(5.0, _env_float("COOKIE_TEST_TIMEOUT_SECONDS", 45.0))
 COOKIES_MAX_BYTES = 100 * 1024
 
-# Server-side prefetch of the top search results.  A single background worker
-# keeps bot-check risk and Deno/CPU load bounded; both limits are clamped.
+# Server-side prefetch of the top search results.  One worker (or three in
+# parallel mode) keeps bot-check risk and Deno/CPU load bounded; both limits
+# are clamped.
 SEARCH_PREFETCH_ENABLED = os.getenv("SEARCH_PREFETCH_ENABLED", "1") == "1"
+SEARCH_PREFETCH_PARALLEL = os.getenv("SEARCH_PREFETCH_PARALLEL", "0") == "1"
 SEARCH_PREFETCH_TOP_N = min(5, max(1, _env_int("SEARCH_PREFETCH_TOP_N", 3)))
 SEARCH_PREFETCH_QUEUE_SIZE = min(50, max(1, _env_int("SEARCH_PREFETCH_QUEUE_SIZE", 12)))
+SEARCH_PREFETCH_WORKERS = min(
+    3, max(1, _env_int("SEARCH_PREFETCH_WORKERS", 3 if SEARCH_PREFETCH_PARALLEL else 1))
+)
 SEARCH_PREFETCH_SETTLE_SECONDS = min(2.0, max(0.0, _env_float(
-    "SEARCH_PREFETCH_SETTLE_SECONDS", 1.0
+    "SEARCH_PREFETCH_SETTLE_SECONDS", 0.0 if SEARCH_PREFETCH_PARALLEL else 1.0
 )))
 SEARCH_PREFETCH_DEDUPE_SECONDS = min(5.0, max(0.0, _env_float(
     "SEARCH_PREFETCH_DEDUPE_SECONDS", 1.0
@@ -378,6 +383,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             queue_size=SEARCH_PREFETCH_QUEUE_SIZE,
             settle_seconds=SEARCH_PREFETCH_SETTLE_SECONDS,
             dedupe_seconds=SEARCH_PREFETCH_DEDUPE_SECONDS,
+            workers=SEARCH_PREFETCH_WORKERS,
         )
         await _search_prefetcher.start()
 

@@ -137,6 +137,24 @@ _FAST_CLIENT_SETS: Tuple[Tuple[str, ...], ...] = (
 # Prefetch and taps both race; canary/cookie validation stay serial.
 _PARALLEL_RESOLVE = True
 
+# Parallel prefetch mode warms the top search results concurrently.  It needs a
+# third prefetch resolve/extract slot and one slot reserved for a user tap.
+_PREFETCH_PARALLEL = os.getenv("SEARCH_PREFETCH_PARALLEL", "0") == "1"
+
+# Prefetch normally walks the client sets sequentially so it never competes
+# with a tap.  In parallel mode it starts with the set that exposes the
+# audio-only itags: one pass then usually wins instead of two sequential ones.
+_PREFETCH_FAST_CLIENT_SETS: Tuple[Tuple[str, ...], ...] = (
+    ("web_embedded", "default"),
+    ("web",),
+    ("web_embedded",),
+)
+
+
+def _prefetch_client_sets() -> Tuple[Tuple[str, ...], ...]:
+    """Client-set order for prefetch: one fast pass in parallel mode."""
+    return _PREFETCH_FAST_CLIENT_SETS if _PREFETCH_PARALLEL else _FAST_CLIENT_SETS
+
 # Muxed 360p MP4 with AAC audio (itag 18).  Used as a gate-free fallback when
 # the audio-only stream is behind a pre-roll.
 _MUXED_ITAG = 18
@@ -167,14 +185,19 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
-_RESOLVE_CONCURRENCY = _env_int("YTDLP_RESOLVE_CONCURRENCY", 2)
+_RESOLVE_CONCURRENCY = _env_int(
+    "YTDLP_RESOLVE_CONCURRENCY", 4 if _PREFETCH_PARALLEL else 2
+)
 _RESOLVE_SEMAPHORE = threading.BoundedSemaphore(_RESOLVE_CONCURRENCY)
 # Global cap on yt-dlp extractions, not just race pool workers.  Each
 # extraction may start a Deno JSC solver (~250 MB with the Dockerfile's
 # DENO_V8_FLAGS), so three is the most that fit next to Python in the 1 GB
-# Railway container.  The semaphore wraps _extract_formats itself, so it also
-# covers the serial canary and cookie validation, which bypass the pool.
-_EXTRACT_CONCURRENCY = _env_int("YTDLP_EXTRACT_CONCURRENCY", 3)
+# Railway container.  Parallel prefetch mode raises the default to four: three
+# prefetch jobs plus one reserved for a tap.  Watch memory and bot checks when
+# enabling it.
+_EXTRACT_CONCURRENCY = _env_int(
+    "YTDLP_EXTRACT_CONCURRENCY", 4 if _PREFETCH_PARALLEL else 3
+)
 _EXTRACT_SEMAPHORE = threading.BoundedSemaphore(_EXTRACT_CONCURRENCY)
 # Background extraction threads are bounded too: an early-race win leaves the
 # other clients running for a few seconds, so a fixed pool prevents thread
@@ -187,13 +210,15 @@ _EXTRACT_POOL = ThreadPoolExecutor(
 # occupy one of the user resolve slots (a tap and the radio prefetch already
 # use both of them).
 _CANARY_SEMAPHORE = threading.BoundedSemaphore(1)
-# At most one background prefetch may occupy a resolve slot, so a user tap
-# always finds a free slot even while search results are being warmed.
-_PREFETCH_GUARD = threading.BoundedSemaphore(1)
-# Prefetch has its own single extraction slot on top of the global cap, so
-# background warm-up can hold at most one of the extraction slots and a tap
-# keeps at least two.
-_PREFETCH_EXTRACT_SEMAPHORE = threading.BoundedSemaphore(1)
+# Normally at most one background prefetch may occupy a resolve slot, so a user
+# tap always finds a free slot.  Parallel mode allows one slot per top result
+# and keeps one resolve slot free for a tap.
+_PREFETCH_GUARD = threading.BoundedSemaphore(3 if _PREFETCH_PARALLEL else 1)
+# Prefetch has its own extraction budget on top of the global cap.  In parallel
+# mode three warm-ups run at once and one global slot stays free for a tap.
+_PREFETCH_EXTRACT_SEMAPHORE = threading.BoundedSemaphore(
+    3 if _PREFETCH_PARALLEL else 1
+)
 _MIN_RESOLVE_INTERVAL = _env_float("YTDLP_MIN_RESOLVE_INTERVAL", 0.0)
 _RESOLVE_PACING_LOCK = threading.Lock()
 _last_resolve_at = 0.0
@@ -873,7 +898,7 @@ def _resolve_prefetch(
     extract_calls = 0
     fmt: Optional[dict] = None
 
-    for clients in _FAST_CLIENT_SETS:
+    for clients in _prefetch_client_sets():
         _raise_if_stopped(should_stop)
         try:
             extra = _extract_formats(
