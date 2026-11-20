@@ -1,7 +1,7 @@
 # Lammot — Project Status
 
 Last updated: 2026-11-20
-Verified against: `main @ 06e76d3`
+Verified against: `PR #27` (2026-11-20)
 Maintained by: Project Manager / Architect
 
 > Read this first for current state. Use [ARCHITECTURE.md](../ARCHITECTURE.md)
@@ -11,11 +11,10 @@ Maintained by: Project Manager / Architect
 
 ## Current focus
 
-- Search-prefetch latency investigation: stale in-flight prefetch work and
-  shared extraction slots can delay the final query’s tap-to-audio by roughly
-  4–11 s.
-- Fix the prefetch scheduler and resolver capacity policy, then verify the
-  production `api_stream resolve_ms` and `audio_relay first_chunk_ms` numbers.
+- Verify `PREFETCH-001`/`PREFETCH-002` in production after deploy: check
+  `api_stream resolve_ms` and `audio_relay first_chunk_ms`.
+- Search is now explicit-submit only: typing no longer calls `/api/search` or
+  starts prefetch.
 
 ## In progress
 
@@ -49,6 +48,7 @@ Maintained by: Project Manager / Architect
 | Current | Audio is relayed through the server; audio files are not stored | googlevideo URLs only work from the resolving IP, and the server must not store media | `app/main.py` `/audio`, `ARCHITECTURE.md` section 1 |
 | 2026-11-20 | Implementation work stays off `main` and follows the documented TDD cycle | Keep `main` deployable and prove every fix with a regression test | `AGENTS.md`, PR #22 |
 | 2026-11-20 | Prefetch settle is interruptible and defaults to 1 s; a background prefetch does not wait for a per-key lock already held by a tap | Production logs showed the final track's prefetch 3.4 s behind a stale job while the tap cold-resolved for 4.3 s | `app/prefetch.py`, `app/resolver.py`, Railway logs 17:54 |
+| 2026-11-20 | Search is explicit-submit only; typing does not call `/api/search` or start prefetch | Intermediate keystroke queries enqueued unnecessary prefetch work and could delay the final query | `frontend/search-query.js`, `frontend/app.js`, PR #27 |
 
 ## Recently completed
 
@@ -59,6 +59,7 @@ Maintained by: Project Manager / Architect
 | 2026-11-17 | iOS track duration from metadata is authoritative | `5f3f392` (#20) |
 | 2026-11-17 | Ignore doubled iOS media duration and end tracks on time | `f2e5d4f` (#21) |
 | 2026-11-20 | Multi-agent workflow and TDD rules in `AGENTS.md` | `1056314` (#22) |
+| 2026-11-20 | Explicit-submit search: no search or prefetch while typing | PR #27 |
 
 ## Next up
 

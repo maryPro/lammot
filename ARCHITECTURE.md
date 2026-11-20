@@ -1,9 +1,9 @@
 # LammotBot — Architecture
 
 **Telegram Mini App Music Player**
-Version: 1.2 | Stack: Python + FastAPI + SQLite + HTML/CSS/JS | Deploy: Docker on Railway
+Version: 1.3 | Stack: Python + FastAPI + SQLite + HTML/CSS/JS | Deploy: Docker on Railway
 
-Last verified against: `main @ 1056314` (2026-11-20)
+Last verified against: `PR #27` (2026-11-20)
 Project status: [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)
 
 ---
@@ -36,7 +36,9 @@ Key behaviors spread across backend and client:
 - **Background prefetch of search results** — after `/api/search` answers,
   `app/prefetch.py` resolves the top 3 results in the background so a tap hits
   a warm resolver cache. A newer search from the same user supersedes older
-  queued prefetches.
+  queued prefetches. The Mini App calls `/api/search` only on explicit submit
+  (Enter or the keyboard Search action); typing alone does not trigger search
+  or prefetch.
 - **Client-side prefetch of the next queue track** — the frontend asks for the
   next track's stream about 15 seconds before the current one ends.
 - **Opus/AAC selection on the client** — `frontend/audio-format.js` chooses the

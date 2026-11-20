@@ -1,9 +1,9 @@
 # LammotBot — UI Specification
 
 **Telegram Mini App | Language: English**
-Version: 1.1
+Version: 1.2
 
-Last verified against: `main @ 1056314` (2026-11-20)
+Last verified against: `PR #27` (2026-11-20)
 Project status: [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)
 
 ---
@@ -116,7 +116,10 @@ Silver, and Matrix Green, white text on dark accents.
 ```
 
 - The search field is a 44 px pill.
-- Search starts at 2 characters, with a 300 ms debounce.
+- Search runs only on explicit Enter / the mobile keyboard Search action.
+  Typing never requests or displays results.
+- Editing the query hides any previous results and returns to Recent searches.
+- At least 2 characters are required to submit.
 - Up to 20 results are requested (`limit=20`); the API cap is 25.
 - Recent searches show up to 10 unique queries, newest first.
 - With no recent searches, the home screen shows an empty-state message
@@ -352,10 +355,21 @@ Appears above the bottom bar once a track is loaded. Height: `--mini-h` (64 px).
 ### Search flow
 
 1. Tap the search field → keyboard opens; recent searches are already visible.
-2. Typing at least 2 characters starts a debounced search (300 ms).
-3. Pressing Enter runs the search immediately and records the query.
-4. Tapping a search result records the search, blurs the field, and starts
-   radio mode.
+2. Type freely → no request, no results, no spinner. Editing hides any previous
+   results and returns to Recent searches.
+3. Press Enter (or the mobile keyboard Search action) with at least 2
+   characters: the query is recorded, a spinner appears, results are requested,
+   and the server starts prefetch for that final query only.
+4. Results appear only after the response arrives.
+5. Tapping a search result records the search if needed, blurs the field, and
+   starts radio mode.
+6. Tapping a recent search submits it immediately, through the same path as
+   Enter.
+7. Clearing the field aborts an in-flight request and returns to idle.
+
+Enter with fewer than 2 characters is a no-op and keeps focus in the field. A
+duplicate Enter for the same query that is already loading or displayed is also
+a no-op (pressing Try again after an error retries).
 
 ### Adding to Favorites
 
