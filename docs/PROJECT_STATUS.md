@@ -1,7 +1,7 @@
 # Lammot — Project Status
 
 Last updated: 2026-11-20
-Verified against: `main @ 06e76d3`
+Verified against: `fix-prefetch-2-0 @ ca71e5a`
 Maintained by: Project Manager / Architect
 
 > Read this first for current state. Use [ARCHITECTURE.md](../ARCHITECTURE.md)
@@ -11,17 +11,16 @@ Maintained by: Project Manager / Architect
 
 ## Current focus
 
-- Search-prefetch latency investigation: stale in-flight prefetch work and
-  shared extraction slots can delay the final query’s tap-to-audio by roughly
-  4–11 s.
-- Fix the prefetch scheduler and resolver capacity policy, then verify the
-  production `api_stream resolve_ms` and `audio_relay first_chunk_ms` numbers.
+- Search prefetch 2.0: explicit Enter submission and no live search results.
+  Typing must not call `/api/search` or start prefetch; only an explicit submit
+  does.
 
 ## In progress
 
 | Task | Owner | State | Next step | Updated |
 |---|---|---|---|---|
 | Search-prefetch latency and log-hygiene fix (`PREFETCH-001`, `PREFETCH-002`) | Developer (fix-prefetch worktree) | Follow-up implemented, tests green; pending deploy/verification | Deploy and repeat the production-timing check | 2026-11-20 |
+| Search prefetch 2.0 — explicit-submit-only search (`PREFETCH-003`) | Developer (fix-prefetch-2-0 worktree) | Implemented with red/green tests; docs updated; pending manual verification and merge | Manually verify no request/results while typing, then open PR and squash-merge | 2026-11-20 |
 
 ## Known bugs
 
@@ -29,6 +28,7 @@ Maintained by: Project Manager / Architect
 |---|---|---|---|---|---|---|
 | PREFETCH-001 | High | After a search, waiting several seconds and tapping the top result can still take ~4–11 s to start audio. The final query’s prefetch can be blocked behind a stale in-flight job, and a tap can then wait for a cold resolve that competes with background extraction for slots. | Search prefetch / resolver | Use `SEARCH_PREFETCH_ENABLED=0` as an operational fallback if prefetch makes latency worse; otherwise retry | Add a settle window; give prefetch its own 1-slot sequential extraction path; add correlation/timing logs and regression tests; verify production `api_stream resolve_ms` and `audio_relay first_chunk_ms` | 2026-11-20 |
 | PREFETCH-002 | Medium | Parallel yt-dlp extractions can truncate or rewrite the shared cookies file, producing `does not look like a Netscape format cookies file` and risking permanent cookie corruption. | Resolver / cookies | Re-upload cookies with `/cookies` if errors persist | Make extraction read-only for cookies; keep `/cookies` as the only atomic writer; add a test | 2026-11-20 |
+| PREFETCH-003 | Medium | Search results and prefetch start on every debounced keystroke; intermediate queries can enqueue unnecessary prefetch work and the final query can start behind them. | Search UX / prefetch | Wait for the final results; retry if a track is slow | Require explicit Enter submit; hide results and prefetch until submit; update UI spec | 2026-11-20 |
 
 ## Known limitations / tech debt
 
@@ -62,6 +62,8 @@ Maintained by: Project Manager / Architect
 
 ## Next up
 
+- Manually verify `PREFETCH-003` (no `/api/search` while typing) and squash-merge
+  the explicit-submit search change; then move it to **Recently completed**.
 - Fix `PREFETCH-001`: stale in-flight prefetch and extraction-slot contention.
 - Fix `PREFETCH-002`: concurrent cookie writes during yt-dlp extraction.
 - Reduce log noise: expected INFO must not appear as Railway `[err]`.
