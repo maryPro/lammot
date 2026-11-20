@@ -1070,3 +1070,36 @@ class TestPrefetchExtractionPolicy:
 
         assert cache_get("dQw4w9WgXcQ") is None
         assert cache_get("dQw4w9WgXcQ:unavailable") is None
+
+    def test_background_prefetch_skips_a_key_already_being_resolved(self):
+        """A tap holding the key lock must not pin the single prefetch worker."""
+        lock = resolver._resolve_lock("dQw4w9WgXcQ")
+        lock.acquire()
+        release = threading.Timer(0.4, lock.release)
+        release.start()
+        started = time.perf_counter()
+        try:
+            with patch("app.resolver._extract_formats", return_value=_FORMATS_BOTH):
+                with pytest.raises(resolver.PrefetchCancelled):
+                    get_stream_url(
+                        "dQw4w9WgXcQ", prefetch=True, should_stop=lambda: False
+                    )
+            elapsed = time.perf_counter() - started
+        finally:
+            release.join()
+
+        assert elapsed < 0.2
+
+    def test_client_prefetch_still_waits_for_a_key_lock(self):
+        """The browser's ?prefetch=1 request is not a background job."""
+        lock = resolver._resolve_lock("dQw4w9WgXcQ")
+        lock.acquire()
+        release = threading.Timer(0.1, lock.release)
+        release.start()
+        try:
+            with patch("app.resolver._extract_formats", return_value=_FORMATS_BOTH):
+                url = get_stream_url("dQw4w9WgXcQ", prefetch=True)
+        finally:
+            release.join()
+
+        assert url == _FAKE_URL_251

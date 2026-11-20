@@ -346,6 +346,43 @@ async def test_settle_drops_superseded_job_before_extraction():
     assert resolved == [VID2]
 
 
+async def test_new_search_wakes_the_worker_during_settle():
+    """A newer generation must not wait for the stale job's full settle."""
+    resolved = []
+
+    async def resolve(video_id, fmt, should_stop=None):
+        resolved.append(video_id)
+        return "https://cdn.example/audio", {}
+
+    prefetcher = _prefetcher(resolve, settle_seconds=0.5)
+    await prefetcher.start()
+    try:
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        prefetcher.enqueue_results(_results(VID), "opus", owner=1)
+        await asyncio.sleep(0.15)
+        assert prefetcher._queue.qsize() == 0  # the first job is in settle
+        prefetcher.enqueue_results(_results(VID2), "opus", owner=1)
+        await asyncio.wait_for(prefetcher._queue.join(), 2)
+        elapsed = loop.time() - started
+    finally:
+        await prefetcher.stop()
+
+    assert resolved == [VID2]
+    assert elapsed < 0.85
+
+
+async def test_default_settle_is_one_second():
+    from app.prefetch import SearchPrefetcher
+
+    async def resolve(video_id, fmt, should_stop=None):
+        return "https://cdn.example/audio", {}
+
+    prefetcher = SearchPrefetcher(resolve, lambda url, headers: None)
+
+    assert prefetcher._settle_seconds == 1.0
+
+
 async def test_latest_generation_is_processed_after_stale_settle():
     """Several fast keystrokes leave only the final query's top result."""
     resolved = []

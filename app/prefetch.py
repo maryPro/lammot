@@ -71,7 +71,7 @@ class SearchPrefetcher:
         *,
         top_n: int = 3,
         queue_size: int = 12,
-        settle_seconds: float = 0.5,
+        settle_seconds: float = 1.0,
         dedupe_seconds: float = 1.0,
     ) -> None:
         self._resolve = resolve
@@ -89,6 +89,10 @@ class SearchPrefetcher:
         self._generations: Dict[Any, int] = {}
         # Owner-scoped signature of the last enqueued batch and its timestamp.
         self._last_signature: Dict[Any, Tuple[Tuple[str, ...], float]] = {}
+        # Wakes the worker out of its settle window as soon as a new search
+        # arrives, so a stale job does not hold the only worker for its full
+        # settle time.
+        self._wake = asyncio.Event()
         self._task: Optional[asyncio.Task] = None
 
     def enqueue_results(
@@ -143,6 +147,9 @@ class SearchPrefetcher:
         generation = self._generations.get(owner, 0) + 1
         self._generations[owner] = generation
         self._drop_stale(owner, generation)
+        # Even when the queue is already empty, a stale job may be sleeping in
+        # its settle window; wake it so it can be skipped immediately.
+        self._wake.set()
 
         enqueued = 0
         for video_id in ids:
@@ -212,6 +219,28 @@ class SearchPrefetcher:
         """True when no newer search from the same owner superseded *job*."""
         return job.generation >= self._generations.get(job.owner, job.generation)
 
+    async def _settle(self, job: PrefetchJob) -> None:
+        """
+        Wait the settle window, but return early when a new search arrives.
+
+        The worker then sees that the job is stale and discards it before it
+        spends an extraction slot.  A new search from another owner wakes the
+        loop too; the job stays current and simply continues waiting for the
+        remaining time.
+        """
+        if self._settle_seconds <= 0:
+            return
+        deadline = time.monotonic() + self._settle_seconds
+        while self._is_current(job):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            self._wake.clear()
+            try:
+                await asyncio.wait_for(self._wake.wait(), timeout=remaining)
+            except asyncio.TimeoutError:
+                return
+
     def _drop_stale(self, owner: Any, generation: int) -> None:
         kept: List[PrefetchJob] = []
         dropped = 0
@@ -260,7 +289,7 @@ class SearchPrefetcher:
             try:
                 if self._settle_seconds > 0:
                     started = time.monotonic()
-                    await asyncio.sleep(self._settle_seconds)
+                    await self._settle(job)
                     settle_ms = (time.monotonic() - started) * 1000
 
                 if not self._is_current(job):
