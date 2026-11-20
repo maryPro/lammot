@@ -117,7 +117,8 @@ Silver, and Matrix Green, white text on dark accents.
 ```
 
 - The search field is a 44 px pill.
-- A compact segmented tabs row sits below the search pill: **Songs**
+- A compact segmented tabs row sits below the search pill, centred on the
+  screen: **Songs**
   (default) and **Extended**. Songs searches official YouTube Music tracks;
   Extended searches regular YouTube videos (remixes, slowed versions, fan
   uploads). The tabs use `role="tab"` with `aria-selected`.
@@ -155,8 +156,8 @@ Track card:
 - Artist: 12 px secondary color, one line, truncated.
 - Duration: 12 px secondary color, tabular numerals, right-aligned when known.
 - The row itself starts playback.
-- Extended results show a compact `Video` badge next to the title; song rows
-  have no badge.
+- Extended results show a compact `Video` badge immediately to the left of the
+  duration; song rows have no badge.
 - Search and shared-playlist rows show the favorite button: `+` to add, `✓`
   (checked, greyed) when already saved.
 - The `⋯` more-actions button opens a sheet:

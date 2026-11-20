@@ -187,10 +187,10 @@ body.has-mini .app {
 
 /* ------------------------------------------------------------ search tabs */
 .search-tabs {
-  display: inline-grid;
-  grid-auto-flow: column;
+  display: flex;
+  width: fit-content;
   gap: 2px;
-  margin-top: var(--spacing-sm);
+  margin: var(--spacing-sm) auto 0;
   padding: 3px;
   border-radius: var(--radius-pill);
   background: var(--bg-secondary);
@@ -210,6 +210,7 @@ body.has-mini .app {
 }
 .track-badge {
   flex: none;
+  margin-left: var(--spacing-xs);
   padding: 1px 6px;
   border-radius: var(--radius-pill);
   background: var(--accent-soft);
@@ -218,13 +219,6 @@ body.has-mini .app {
   font-weight: var(--font-weight-bold);
   text-transform: uppercase;
   letter-spacing: 0.04em;
-}
-.track-title.has-badge { display: flex; align-items: center; gap: 6px; }
-.track-title.has-badge .track-title-text {
-  min-width: 0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 /* ------------------------------------------------------------ view header */
