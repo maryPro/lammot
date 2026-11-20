@@ -1053,7 +1053,7 @@
   // Survives per-track resets: once a format is known to work here, every
   // later track and prefetch asks for it instead of paying a second resolve.
   let preferredFormat = AUDIO_FORMAT;
-  const { pickDuration, progressRatio, shouldForceTrackEnd } = window.LammotTime;
+  const { pickDuration, positionState, progressRatio, shouldForceTrackEnd } = window.LammotTime;
   const PlaybackView = window.LammotPlaybackView;
 
   // A play() call made directly inside a tap "unlocks" the <audio> element;
@@ -1487,6 +1487,27 @@
   }
 
   // --- media session (lock screen controls)
+  const MEDIA_POSITION_SYNC_MS = 900;
+  let lastPositionSync = 0;
+
+  // The lock screen timeline is fed by setPositionState.  Without it iOS
+  // falls back to the media element duration, which is doubled on iOS.
+  function applyPositionState(duration, position, force) {
+    if (!('mediaSession' in navigator)
+        || typeof navigator.mediaSession.setPositionState !== 'function') return;
+    const state = positionState(duration, position, audio.playbackRate);
+    if (!state) return;
+    const now = Date.now();
+    if (!force && now - lastPositionSync < MEDIA_POSITION_SYNC_MS) return;
+    lastPositionSync = now;
+    try { navigator.mediaSession.setPositionState(state); } catch (_) { /* unsupported */ }
+  }
+
+  function syncMediaSessionPosition(force) {
+    if (!player.current || isSilent()) return;
+    applyPositionState(playbackDuration(), audio.currentTime, force);
+  }
+
   function updateMediaSession() {
     if (!('mediaSession' in navigator) || !player.current) return;
     const t = player.current;
@@ -1496,6 +1517,9 @@
         : [];
       navigator.mediaSession.metadata = new MediaMetadata({ title: t.title, artist: t.artist, artwork });
     } catch (_) { /* unsupported */ }
+    // A new track starts at zero; reset the system timeline immediately
+    // instead of waiting for the first timeupdate.
+    applyPositionState(t.duration_seconds, 0, true);
   }
 
   function bindMediaSession() {
@@ -1630,12 +1654,18 @@
     audio.addEventListener('pause', () => {
       player.playing = false;
       renderPlayState();
+      syncMediaSessionPosition(true);
     });
     audio.addEventListener('playing', () => {
       if (isSilent()) return;
       player.playing = true;
       setLoading(false);
       renderPlayState();
+      // iOS ignores next/previous handlers registered before playback is
+      // active and shows its own ±10 s seek buttons instead.  Register them
+      // again now that the session is active.
+      bindMediaSession();
+      syncMediaSessionPosition(true);
       if (player.current && !player.recorded) {
         player.recorded = true;
         api('/api/history', { method: 'POST', body: { kind: 'play', track: trackBody(player.current) } }).catch(() => {});
@@ -1655,6 +1685,7 @@
       }
       const duration = playbackDuration();
       renderProgress(audio.currentTime, duration);
+      syncMediaSessionPosition(false);
       // Lazy resolve: get the next song's link ~15 s before this one ends
       const upcoming = player.queue[0];
       if (upcoming && !player.botCheck && duration > 0 && duration - audio.currentTime < PREFETCH_SECONDS
@@ -1667,8 +1698,10 @@
       audio.addEventListener(evt, () => {
         if (isSilent()) return;
         renderProgress(audio.currentTime, playbackDuration());
+        syncMediaSessionPosition(true);
       });
     }
+    audio.addEventListener('seeked', () => syncMediaSessionPosition(true));
     audio.addEventListener('ended', () => {
       if (isSilent()) return;
       player.playing = false;

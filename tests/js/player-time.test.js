@@ -5,7 +5,7 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const { pickDuration, progressRatio, shouldForceTrackEnd } = require('../../frontend/player-time.js');
+const { pickDuration, positionState, progressRatio, shouldForceTrackEnd } = require('../../frontend/player-time.js');
 
 test('pickDuration: iOS reports doubled media duration', () => {
   assert.strictEqual(pickDuration(483, 242, 0), 242);
@@ -91,6 +91,34 @@ test('progressRatio: zero duration', () => {
   assert.strictEqual(progressRatio(10, 0), 0);
 });
 
+test('positionState: reports the corrected duration and position', () => {
+  assert.deepStrictEqual(positionState(228, 6, 1), { duration: 228, position: 6, playbackRate: 1 });
+});
+
+test('positionState: clamps position past the corrected duration', () => {
+  assert.deepStrictEqual(positionState(228, 500, 1), { duration: 228, position: 228, playbackRate: 1 });
+});
+
+test('positionState: clamps a negative position to zero', () => {
+  assert.deepStrictEqual(positionState(228, -4, 1), { duration: 228, position: 0, playbackRate: 1 });
+});
+
+test('positionState: NaN position becomes zero', () => {
+  assert.deepStrictEqual(positionState(228, NaN, 1), { duration: 228, position: 0, playbackRate: 1 });
+});
+
+test('positionState: invalid playback rate falls back to one', () => {
+  assert.deepStrictEqual(positionState(228, 6, 0), { duration: 228, position: 6, playbackRate: 1 });
+});
+
+test('positionState: unknown duration returns null', () => {
+  assert.strictEqual(positionState(0, 6, 1), null);
+});
+
+test('positionState: live stream duration returns null', () => {
+  assert.strictEqual(positionState(Infinity, 6, 1), null);
+});
+
 test('app.js wiring uses the shared duration helper', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', '..', 'frontend', 'app.js'), 'utf8');
   assert.match(source, /function playbackDuration\(\)/, 'app.js must define playbackDuration()');
@@ -98,4 +126,10 @@ test('app.js wiring uses the shared duration helper', () => {
   assert.match(source, /shouldForceTrackEnd\(/, 'timeupdate must force the end of a doubled stream');
   assert.match(source, /player\.forcedEnd/, 'forced end must be guarded once per track');
   assert.doesNotMatch(source, /audio\.duration \|\|/, 'seek/timeupdate must not fall back to raw audio.duration');
+  assert.match(source, /positionState\(/, 'media session must use the shared position helper');
+  assert.match(source, /setPositionState\(/, 'the system timeline must be told the corrected duration');
+  assert.match(source, /addEventListener\('playing',\s*\(\)\s*=>\s*\{[\s\S]*?bindMediaSession\(\)/,
+    'iOS only honors prev/next handlers registered once playback is active');
+  assert.doesNotMatch(source, /setActionHandler\('seek(?:backward|forward)'/,
+    'seek handlers would replace prev/next on the iOS lock screen');
 });
