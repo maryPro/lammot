@@ -25,7 +25,6 @@
     ['Indigo', '#6610F2'], ['Ocean', '#006994'], ['Silver', '#C0C0C0'],
   ];
   const DEFAULT_ACCENT = '#BC13FE';
-  const SEARCH_DEBOUNCE_MS = 300;
   const SEARCH_MIN_CHARS = 2;
   const QUEUE_VISIBLE = 5;
   const PREFETCH_SECONDS = 15;     // resolve the next song this long before the end
@@ -567,7 +566,8 @@
 
   // ------------------------------------------------------------ search (home)
   const searchInput = $('search-input');
-  let searchTimer = 0;
+  const SearchQuery = window.LammotSearchQuery;
+  if (!SearchQuery) throw new Error('search-query.js failed to load');
   let searchController = null;
   let searchSeq = 0;
 
@@ -579,25 +579,22 @@
   }
 
   function onSearchInput() {
-    const q = searchInput.value;
-    $('search-clear').hidden = q.length === 0;
-    clearTimeout(searchTimer);
-    if (q.trim().length < SEARCH_MIN_CHARS) {
-      if (searchController) searchController.abort();
-      searchSeq += 1;
-      state.search = { q: q.trim(), status: 'idle', results: [], error: '' };
-      renderHome();
-      return;
-    }
-    searchTimer = setTimeout(() => runSearch(q.trim()), SEARCH_DEBOUNCE_MS);
+    $('search-clear').hidden = searchInput.value.length === 0;
+    if (searchController) searchController.abort();
+    searchSeq += 1;
+    state.search = SearchQuery.idleStateForQuery(searchInput.value);
+    renderHome();
   }
 
-  async function runSearch(q) {
+  async function submitSearch(raw, { remember = true } = {}) {
+    const q = SearchQuery.shouldSubmitQuery(state.search, raw, SEARCH_MIN_CHARS);
+    if (q === null) return;
     if (searchController) searchController.abort();
+    const seq = ++searchSeq;
     prefetchQueue.length = 0;  // drop warm-ups for the previous query
     searchController = new AbortController();
-    const seq = ++searchSeq;
-    state.search = { q, status: 'loading', results: state.search.results, error: '' };
+    state.search = { q, status: 'loading', results: [], error: '' };
+    if (remember) rememberSearch(q);
     renderHome();
     try {
       const results = await api(`/api/search?q=${encodeURIComponent(q)}&limit=20&format=${preferredFormat}`, { signal: searchController.signal });
@@ -631,8 +628,7 @@
             onClick: () => {
               searchInput.value = q;
               $('search-clear').hidden = false;
-              clearTimeout(searchTimer);
-              runSearch(q);
+              submitSearch(q);
             },
           }, icon('clock'), h('span', { text: q }))))));
       } else {
@@ -652,7 +648,7 @@
         h('strong', { text: 'Search failed' }),
         s.error,
         h('br'),
-        h('button', { class: 'retry-btn', type: 'button', text: 'Try again', onClick: () => runSearch(s.q) })));
+        h('button', { class: 'retry-btn', type: 'button', text: 'Try again', onClick: () => submitSearch(s.q, { remember: false }) })));
       return;
     }
 
@@ -667,7 +663,6 @@
       s.results.map((track) => trackRow(track, {
         variant: 'search',
         onPlay: () => {
-          rememberSearch(s.q);
           searchInput.blur();
           playRadio(track);
         },
@@ -1567,15 +1562,12 @@
   function bindStaticUI() {
     searchInput.addEventListener('input', onSearchInput);
     searchInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
-        const q = searchInput.value.trim();
-        if (q.length >= SEARCH_MIN_CHARS) {
-          clearTimeout(searchTimer);
-          runSearch(q);
-          rememberSearch(q);
-        }
-        searchInput.blur();
-      }
+      if (e.key !== 'Enter' || e.isComposing || e.keyCode === 229) return;
+      e.preventDefault();
+      const q = SearchQuery.normalizeQuery(searchInput.value);
+      if (!SearchQuery.canSubmitQuery(q, SEARCH_MIN_CHARS)) return;
+      submitSearch(q);
+      searchInput.blur();
     });
     $('search-clear').addEventListener('click', clearSearch);
 
