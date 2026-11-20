@@ -656,14 +656,16 @@ async def api_search(
     q: str = Query(..., min_length=1, max_length=200, description="Search query"),
     limit: int = Query(10, ge=1, le=25),
     format: Literal["opus", "aac"] = Query("opus", alias="format"),
+    type: Literal["songs", "videos"] = Query("songs"),
     user: auth.TelegramUser = Depends(current_user),
 ):
     search_limiter.check(user.id)
     q_hash = _query_hash(q)
+    searcher = search.search_videos if type == "videos" else search.search_songs
     try:
-        results = await run_in_threadpool(search.search_songs, q, limit)
+        results = await run_in_threadpool(searcher, q, limit)
     except Exception:
-        logger.exception("Search failed for q_hash=%s", q_hash)
+        logger.exception("Search failed for q_hash=%s type=%s", q_hash, type)
         raise HTTPException(status_code=502, detail="Search service unavailable")
     enqueued = 0
     if _search_prefetcher is not None:
@@ -676,8 +678,9 @@ async def api_search(
             # A prefetch bug must never turn a successful search into a 500.
             logger.exception("search prefetch enqueue failed")
     logger.info(
-        "api_search q_hash=%s format=%s results=%d prefetch_enqueued=%d",
+        "api_search q_hash=%s type=%s format=%s results=%d prefetch_enqueued=%d",
         q_hash,
+        type,
         format,
         len(results),
         enqueued,
@@ -893,6 +896,7 @@ async def api_radio(
         description="video_ids already in the client's queue (up to 50)",
     ),
     limit: int = Query(5, ge=1, le=20),
+    kind: Literal["song", "video"] = Query("song"),
     user: auth.TelegramUser = Depends(db_user),
 ):
     queued = _validate_video_ids(exclude)
@@ -900,9 +904,11 @@ async def api_radio(
     # Order-preserving de-duplication: client queue first, then play history
     history = list(dict.fromkeys([*queued, *(row["track_id"] for row in played)]))
     try:
-        queue = await run_in_threadpool(radio.get_radio_queue, video_id, history, limit)
+        queue = await run_in_threadpool(
+            radio.get_radio_queue, video_id, history, limit, kind=kind
+        )
     except Exception:
-        logger.exception("Radio failed for video_id=%s", video_id)
+        logger.exception("Radio failed for video_id=%s kind=%s", video_id, kind)
         raise HTTPException(status_code=502, detail="Radio service unavailable")
     return _ok(queue)
 

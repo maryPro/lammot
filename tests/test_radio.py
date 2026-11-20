@@ -70,3 +70,53 @@ def test_upstream_error_propagates():
     with patch("app.radio._get_client", return_value=client):
         with pytest.raises(Exception, match="network down"):
             get_radio_queue("seed")
+
+
+# ------------------------------------------------------------- video radio
+def test_video_radio_excludes_long_unknown_and_live_entries():
+    tracks = [
+        {"videoId": "seed", "title": "Seed", "channel": "C", "length": "9:29"},
+        {"videoId": "short", "title": "Short", "channel": "C", "length": "0:20"},
+        {"videoId": "long", "title": "Long", "channel": "C", "length": "31:00"},
+        {"videoId": "unknown", "title": "Unknown", "channel": "C"},
+        {"videoId": "live", "title": "Live", "channel": "C", "length": "4:00", "isLive": True},
+        {"videoId": "good1", "title": "Good 1", "artists": [{"name": "A"}], "length": "4:00"},
+        {"videoId": "good2", "title": "Good 2", "artists": [{"name": "B"}], "length": "5:00"},
+    ]
+    with patch("app.radio._get_client", return_value=_client_returning(tracks)):
+        queue = get_radio_queue("seed", history=[], limit=5, kind="video")
+
+    assert [t["video_id"] for t in queue] == ["good1", "good2"]
+
+
+def test_video_radio_uses_channel_when_artists_are_missing():
+    tracks = [
+        {"videoId": "v1", "title": "T1", "channel": "KIRMAN", "length": "4:00"},
+    ]
+    with patch("app.radio._get_client", return_value=_client_returning(tracks)):
+        queue = get_radio_queue("seed", history=[], limit=5, kind="video")
+
+    assert queue[0]["artist"] == "KIRMAN"
+
+
+def test_video_radio_second_pass_fills_past_the_diversity_filter():
+    tracks = [
+        {"videoId": "a1", "title": "A1", "artists": [{"name": "Same"}], "length": "3:00"},
+        {"videoId": "a2", "title": "A2", "artists": [{"name": "Same"}], "length": "3:10"},
+        {"videoId": "a3", "title": "A3", "artists": [{"name": "Same"}], "length": "3:20"},
+    ]
+    with patch("app.radio._get_client", return_value=_client_returning(tracks)):
+        queue = get_radio_queue("seed", history=[], limit=3, kind="video")
+
+    assert [t["video_id"] for t in queue] == ["a1", "a2", "a3"]
+
+
+def test_song_radio_keeps_the_diversity_filter_without_a_second_pass():
+    tracks = [
+        {"videoId": "a1", "title": "A1", "artists": [{"name": "Same"}]},
+        {"videoId": "a2", "title": "A2", "artists": [{"name": "Same"}]},
+    ]
+    with patch("app.radio._get_client", return_value=_client_returning(tracks)):
+        queue = get_radio_queue("seed", history=[], limit=3)
+
+    assert [t["video_id"] for t in queue] == ["a1"]

@@ -283,6 +283,9 @@
     playlists: null,             // null = not loaded yet
     recent: [],
     search: { q: '', status: 'idle', results: [], error: '' },
+    searchType: window.LammotSearchTabs
+      ? window.LammotSearchTabs.normalizeTab('songs')
+      : 'songs',
     viewStack: [],               // [{ name, params }]
   };
 
@@ -362,7 +365,11 @@
     },
     thumb(track.thumbnail_url),
     h('span', { class: 'track-text' },
-      h('span', { class: 'track-title', text: track.title || 'Untitled' }),
+      track.kind === 'video'
+        ? h('span', { class: 'track-title has-badge' },
+            h('span', { class: 'track-title-text', text: track.title || 'Untitled' }),
+            h('span', { class: 'track-badge', text: 'Video' }))
+        : h('span', { class: 'track-title', text: track.title || 'Untitled' }),
       h('span', { class: 'track-artist', text: track.artist || 'Unknown artist' })),
     track.duration_seconds ? h('span', { class: 'track-dur', text: fmtTime(track.duration_seconds) }) : null);
 
@@ -568,6 +575,8 @@
   const searchInput = $('search-input');
   const SearchQuery = window.LammotSearchQuery;
   if (!SearchQuery) throw new Error('search-query.js failed to load');
+  const SearchTabs = window.LammotSearchTabs;
+  if (!SearchTabs) throw new Error('search-tabs.js failed to load');
   let searchController = null;
   let searchSeq = 0;
 
@@ -586,9 +595,12 @@
     renderHome();
   }
 
-  async function submitSearch(raw, { remember = true } = {}) {
-    const q = SearchQuery.shouldSubmitQuery(state.search, raw, SEARCH_MIN_CHARS);
+  async function submitSearch(raw, { remember = true, force = false } = {}) {
+    const q = force
+      ? SearchQuery.normalizeQuery(raw)
+      : SearchQuery.shouldSubmitQuery(state.search, raw, SEARCH_MIN_CHARS);
     if (q === null) return;
+    if (force && !SearchQuery.canSubmitQuery(q, SEARCH_MIN_CHARS)) return;
     if (searchController) searchController.abort();
     const seq = ++searchSeq;
     prefetchQueue.length = 0;  // drop warm-ups for the previous query
@@ -597,7 +609,8 @@
     if (remember) rememberSearch(q);
     renderHome();
     try {
-      const results = await api(`/api/search?q=${encodeURIComponent(q)}&limit=20&format=${preferredFormat}`, { signal: searchController.signal });
+      const type = SearchTabs.apiType(state.searchType);
+      const results = await api(`/api/search?q=${encodeURIComponent(q)}&limit=20&format=${preferredFormat}&type=${type}`, { signal: searchController.signal });
       if (seq !== searchSeq) return;
       state.search = { q, status: 'done', results: results || [], error: '' };
     } catch (err) {
@@ -606,6 +619,27 @@
       state.search = { q, status: 'error', results: [], error: err.message };
     }
     renderHome();
+  }
+
+  function updateSearchTabs() {
+    for (const [id, type] of [['search-tab-songs', 'songs'], ['search-tab-videos', 'videos']]) {
+      const tab = $(id);
+      if (tab) tab.setAttribute('aria-selected', String(state.searchType === type));
+    }
+  }
+
+  function setSearchType(type) {
+    const next = SearchTabs.normalizeTab(type);
+    if (next === state.searchType) return;
+    state.searchType = next;
+    updateSearchTabs();
+    if (searchInput.disabled) return;  // outside Telegram: keep the notice
+    const s = state.search;
+    if (s.status === 'done' || s.status === 'loading' || s.status === 'error') {
+      submitSearch(s.q, { remember: false, force: true });
+    } else {
+      renderHome();
+    }
   }
 
   function clearSearch() {
@@ -617,6 +651,7 @@
   function renderHome() {
     const body = $('home-body');
     const s = state.search;
+    updateSearchTabs();
 
     if (s.status === 'idle') {
       const section = h('div', { class: 'section' }, h('h2', { class: 'section-label', text: 'Recent searches' }));
@@ -653,13 +688,29 @@
     }
 
     if (!s.results.length) {
-      body.replaceChildren(h('div', { class: 'state-msg' },
-        h('strong', { text: `Nothing found for “${s.q}”` }),
-        'Check the spelling or try the artist name.'));
+      if (state.searchType === 'videos') {
+        body.replaceChildren(h('div', { class: 'state-msg' },
+          h('strong', { text: `Nothing found for “${s.q}”` }),
+          'No videos under 15:00 found. Try a different query or switch back to Songs.'));
+      } else {
+        body.replaceChildren(h('div', { class: 'state-msg' },
+          h('strong', { text: `Nothing found for “${s.q}”` }),
+          'Check the spelling or try the artist name.',
+          h('br'),
+          h('button', {
+            class: 'retry-btn',
+            type: 'button',
+            text: 'Search Extended',
+            onClick: () => setSearchType('videos'),
+          })));
+      }
       return;
     }
 
-    const list = h('ul', { class: 'track-list', 'aria-label': 'Search results' },
+    const list = h('ul', {
+      class: 'track-list',
+      'aria-label': state.searchType === 'videos' ? 'Extended video results' : 'Song results',
+    },
       s.results.map((track) => trackRow(track, {
         variant: 'search',
         onPlay: () => {
@@ -1079,6 +1130,7 @@
     history: [],        // previously played (for ⏮)
     mode: 'radio',      // 'radio' (search) | 'list' (favorites / playlist)
     source: '',
+    radioKind: 'song',  // 'song' | 'video' — kind of the current radio seed
     loadSeq: 0,
     links: new Map(),   // `${video_id}:${format}` → { url, expires }
     inflight: new Map(), // `${video_id}:${format}` → { promise, prefetch }
@@ -1295,7 +1347,8 @@
 
   function playRadio(track) {
     player.mode = 'radio';
-    player.source = 'Radio: similar songs';
+    player.radioKind = SearchTabs.isVideoTrack(track) ? 'video' : 'song';
+    player.source = player.radioKind === 'video' ? 'Radio: similar videos' : 'Radio: similar songs';
     player.queue = [];
     // startTrack() refills the queue after playback starts, so the radio
     // resolve never competes with the track the user just tapped.
@@ -1326,7 +1379,10 @@
       ...player.queue.map((t) => t.video_id),
       ...player.history.slice(-20).map((t) => t.video_id),
     ])].filter((id) => id !== seed.video_id).slice(0, 50);
-    const qs = new URLSearchParams({ limit: String(RADIO_BATCH) });
+    const qs = new URLSearchParams({
+      limit: String(RADIO_BATCH),
+      kind: player.radioKind === 'video' ? 'video' : 'song',
+    });
     exclude.forEach((id) => qs.append('exclude', id));
     try {
       const more = await api(`/api/radio/${encodeURIComponent(seed.video_id)}?${qs}`);
@@ -1614,6 +1670,11 @@
       searchInput.blur();
     });
     $('search-clear').addEventListener('click', clearSearch);
+
+    for (const [id, type] of [['search-tab-songs', 'songs'], ['search-tab-videos', 'videos']]) {
+      const tab = $(id);
+      if (tab) tab.addEventListener('click', () => setSearchType(type));
+    }
 
     doc.querySelectorAll('.tab').forEach((tab) => {
       tab.addEventListener('click', () => {
