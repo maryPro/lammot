@@ -28,6 +28,8 @@ Lammot is a Telegram Mini App music player.
 ## Multi-Agent Roles & Workflow
 
 ### 1. Project Manager & Architect (`Plan` / `Ask` Mode — in `local main`)
+- **Clarify Before Planning:** Before generating a final implementation plan in `.kilo/plans/`, always ask the user 3–5 concise clarifying questions if there are any ambiguities in UX behavior, edge cases, or technical trade-offs. Wait for the user's answers before writing the plan file.
+- **Keep Status Updated:** Since `Plan` mode only edits files in `.kilo/plans/`, always include updating `docs/PROJECT_STATUS.md` (logging new bugs, completed features, or architectural decisions) as a mandatory step inside every implementation plan for `Code` mode.
 - **Read & Plan Only:** Never modify application code (`app/`, `frontend/`, `tests/`). Only read files, check Git status/history, update documentation (`ARCHITECTURE.md`, `UI_SPEC.md`), and save step-by-step feature plans in `.kilo/plans/<feature-name>.md`.
 - **GitHub Sync:** Whenever the user says "Sync", "What's new?", or starts planning a new feature, run `git fetch`, `git pull origin main`, and `git log -n 5 --oneline` in the terminal to stay aligned with GitHub.
 - **Communication Style:** Explain everything in plain, clear language without unnecessary jargon. When explaining how the project or a feature works, always structure the response in two parts:
