@@ -1,7 +1,7 @@
 # Lammot — Project Status
 
 Last updated: 2026-11-21
-Verified against: main + `fix-system-widget-player-ios` (pending merge)
+Verified against: `f181d9d` (PR #34)
 Maintained by: Project Manager / Architect
 
 > Read this first for current state. Use [ARCHITECTURE.md](../ARCHITECTURE.md)
@@ -11,7 +11,7 @@ Maintained by: Project Manager / Architect
 
 ## Current focus
 
-- Player loading state: remove the dimmed intermediate Pause.
+- Player loading state: merged in PR #34; manual verification pending.
 
 ## In progress
 
@@ -19,7 +19,7 @@ Maintained by: Project Manager / Architect
 |---|---|---|---|---|
 | Cold-start fast path (`cold-start`) | Developer (cold-start worktree) | Implemented, tests green; pending deploy/verification | Deploy and compare `resolve_ms`; watch player-cache reuse and prune logs | 2026-11-20 |
 | Search-prefetch latency and log-hygiene fix (`PREFETCH-001`, `PREFETCH-002`) | Developer (fix-prefetch worktree) | Follow-up implemented, tests green; pending deploy/verification | Deploy and repeat the production-timing check | 2026-11-20 |
-| Player loading state: remove the dimmed intermediate Pause (`PLAYER-001`) | Developer (remove-pause worktree) | Implemented, tests green; pending manual verification | Verify in a real Telegram WebView and deploy; confirm no dimmed Pause | 2026-11-21 |
+| Player loading state: remove the dimmed intermediate Pause (`PLAYER-001`) | Developer (remove-pause worktree) | Merged in PR #34; manual verification pending | Verify in a real Telegram WebView; confirm spinner, no dimmed Pause, and Pause only after playback | 2026-11-21 |
 
 ## Known bugs
 
@@ -27,7 +27,6 @@ Maintained by: Project Manager / Architect
 |---|---|---|---|---|---|---|
 | PREFETCH-001 | High | After a search, waiting several seconds and tapping the top result can still take ~4–11 s to start audio. The final query’s prefetch can be blocked behind a stale in-flight job, and a tap can then wait for a cold resolve that competes with background extraction for slots. | Search prefetch / resolver | Use `SEARCH_PREFETCH_ENABLED=0` as an operational fallback if prefetch makes latency worse; otherwise retry | Add a settle window; give prefetch its own 1-slot sequential extraction path; add correlation/timing logs and regression tests; verify production `api_stream resolve_ms` and `audio_relay first_chunk_ms` | 2026-11-20 |
 | PREFETCH-002 | Medium | Parallel yt-dlp extractions can truncate or rewrite the shared cookies file, producing `does not look like a Netscape format cookies file` and risking permanent cookie corruption. | Resolver / cookies | Re-upload cookies with `/cookies` if errors persist | Make extraction read-only for cookies; keep `/cookies` as the only atomic writer; add a test | 2026-11-20 |
-| PLAYER-001 | Medium | On initial playback, the button switches to a dimmed Pause before audio starts, so it looks disabled for roughly 3–5 s. The icon is driven by the `play` event while loading is still active. | Mini/full player UI | Wait; audio usually starts | Introduce an explicit playback UI state; show a spinner until `playing`; show Pause only after actual playback; guard the button while loading | 2026-11-20 |
 
 ## Known limitations / tech debt
 
@@ -46,6 +45,7 @@ Maintained by: Project Manager / Architect
 
 | Date | Decision | Why | Evidence |
 |---|---|---|---|
+| 2026-11-21 | Playback icon is driven by actual `playing` state, with a spinner during load | The `play` event fires before audio is audible; an explicit state avoids the dimmed Pause stage | `frontend/playback-view.js`, `frontend/app.js`, PR #34 |
 | 2026-11-17 | Background search prefetch is enabled by default: top 3 results, queue size 12, one worker, stale searches dropped | Warm the resolver cache without delaying search responses or queueing a tap behind prefetch work | `app/prefetch.py`, `app/main.py`, PR #18–#19 |
 | 2026-11-17 | iOS uses AAC; track metadata duration is authoritative; doubled media duration is ignored and a forced track end is used | Old iOS webviews cannot play WebM/Opus reliably and some report roughly doubled duration | `frontend/audio-format.js`, `frontend/player-time.js`, PR #20–#21 |
 | Current | Audio is relayed through the server; audio files are not stored | googlevideo URLs only work from the resolving IP, and the server must not store media | `app/main.py` `/audio`, `ARCHITECTURE.md` section 1 |
@@ -61,6 +61,7 @@ Maintained by: Project Manager / Architect
 
 | Date | Change | Commit / PR |
 |---|---|---|
+| 2026-11-21 | Player loading state: spinner during load; Pause only after actual playback | `f181d9d` (#34) |
 | 2026-11-17 | Background prefetch of top search results | `66f6929` (#18) |
 | 2026-11-17 | Prefetch survives pre-roll gates and drops stale searches | `e5ed6b2` (#19) |
 | 2026-11-17 | iOS track duration from metadata is authoritative | `5f3f392` (#20) |
@@ -76,8 +77,9 @@ Maintained by: Project Manager / Architect
 - Deploy the tap-race fix and confirm `api_stream resolve_ms` is ~2–3 s for
   `clients=parallel(web,web_embedded)` / `parallel(web)`; confirm the player
   cache is reused and pruned on the volume.
-- Verify and deploy the player loading-state fix (`PLAYER-001`): spinner during
-  load, Pause only after playback starts.
+- Manually verify the merged player loading-state fix (`PLAYER-001`) in a real
+  Telegram WebView (iOS/Android); confirm the spinner, no dimmed Pause, and
+  Pause only after playback starts.
 - Keep `SEARCH_PREFETCH_PARALLEL=0`; revisit with a staggered prefetch that
   starts the first result alone.
 - Fix `PREFETCH-001`: stale in-flight prefetch and extraction-slot contention.
