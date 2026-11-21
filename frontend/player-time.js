@@ -52,6 +52,17 @@
     return current >= track + TRACK_END_GRACE_SECONDS;
   }
 
+  // Track metadata is the source of truth.  When it is missing, the Apple
+  // media stack estimates a roughly doubled duration for the fragmented AAC
+  // stream we relay, so the halved estimate is the best available value.
+  function durationHint(mediaDuration, trackDuration, appleAac) {
+    var track = positive(trackDuration);
+    if (track) return track;
+    var media = positive(mediaDuration);
+    if (!appleAac || !media) return 0;
+    return media / 2;
+  }
+
   function progressRatio(current, duration) {
     var total = positive(duration);
     if (!total) return 0;
@@ -78,6 +89,7 @@
   }
 
   return {
+    durationHint: durationHint,
     pickDuration: pickDuration,
     positionState: positionState,
     progressRatio: progressRatio,

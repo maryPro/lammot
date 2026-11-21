@@ -9,16 +9,18 @@ const app = fs.readFileSync(path.join(__dirname, '..', '..', 'frontend', 'app.js
 const html = fs.readFileSync(path.join(__dirname, '..', '..', 'frontend', 'index.html'), 'utf8');
 const css = fs.readFileSync(path.join(__dirname, '..', '..', 'frontend', 'style.css'), 'utf8');
 
-test('search rows offer a plus to add and a check when saved', () => {
+test('search rows use the outlined heart and fill it when saved', () => {
   assert.match(app, /heart:\s*'<path d="M12 20/, 'app.js must define an outlined heart icon');
   assert.match(app, /heartFilled:\s*'<path d="M12 20[^']*class="solid"/,
     'app.js must define a filled heart icon');
-  assert.match(app, /icon\(fav \? 'check' : 'plus'\)/,
-    'the search add button must use plus, then a check when saved');
-  assert.match(app, /favButton\(track, 'add'\)/,
-    'search rows must pass the add mode to the favorite button');
   assert.match(app, /icon\(fav \? 'heartFilled' : 'heart'\)/,
-    'the other favorite buttons must use heartFilled when saved and heart when not');
+    'the favorite button must use heartFilled when saved and heart when not');
+  assert.match(app, /favButton\(track\)/,
+    'search rows must render the same heart toggle as every other list');
+  assert.doesNotMatch(app, /icon\(fav \? 'check' : 'plus'\)/,
+    'search rows must not swap the heart for a plus or check');
+  assert.doesNotMatch(app, /favButton\(track, 'add'\)/,
+    'the add-only favorite mode must be removed');
 });
 
 test('tapping a filled heart removes the track from Favorites', () => {
@@ -56,10 +58,8 @@ test('the favorite heart has no circular background', () => {
 });
 
 test('the Favorites screen rows keep a fillable heart', () => {
-  assert.match(app, /opts\.variant === 'search'[\s\S]{0,160}opts\.variant === 'favorites'/,
+  assert.match(app, /opts\.variant !== 'playlist'[\s\S]{0,120}row\.append\(favButton\(track\)\)/,
     'Favorites rows must show the same heart so saved tracks can be unliked there');
-  assert.match(app, /opts\.variant === 'favorites'[\s\S]{0,80}opts\.variant === 'album'/,
-    'album rows must show the same heart');
 });
 
 test('the favorite heart is large enough to read without a background', () => {

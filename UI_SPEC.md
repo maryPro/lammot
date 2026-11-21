@@ -157,8 +157,8 @@ Track card:
 - Title: 14 px bold, one line, truncated.
 - Artist: 12 px secondary color, one line, truncated. It sits directly under
   the title inside the same text block. When the track has an `artist_id`, the
-  artist name is a tappable link that opens the artist page; otherwise it is
-  plain text.
+  artist name is an underlined tappable link that opens the artist page;
+  otherwise it is plain text with no underline.
 - The cover, the two-line text block, the duration and the actions share one
   vertical centre line. The title and artist are separated by a 2 px gap.
 - Duration: 12 px secondary color, tabular numerals, right-aligned when known.
@@ -167,9 +167,10 @@ Track card:
   buttons stay above it.
 - The right side lays out duration, the favourite control and `⋯` with equal
   spacing so a 320 px screen still fits all three without bunching.
-- Search rows show a filled accent circular `＋` to add a track; it switches
-  to an accent `✓` once the track is saved. Favorites, shared-playlist, album
-  and artist rows use the borderless outlined `♡` / filled `♥` instead.
+- Search, Favorites, shared-playlist, album and artist rows use the borderless
+  outlined `♡` / filled `♥` as the one favourite control; search rows no longer
+  use a filled `＋`/`✓`. Playlist rows keep only `⋯` and manage favourites from
+  the track menu.
 - Tapping a filled heart removes the track from Favorites and returns the
   button to the outlined state.
 - Extended results show a compact `Video` badge immediately to the left of the
@@ -303,8 +304,8 @@ Track card:
   track from Favorites. They also keep the `⋯` menu.
 - Playback uses list mode: next track in the filtered list, no radio, and it
   stops after the last track.
-- Empty state: “No favorites yet — Tap + next to a song in search to save it
-  here.”
+- Empty state: “No favorites yet — Tap the heart next to a song in search to
+  save it here.”
 - A filter with no matches shows “No songs match your search.”
 
 ### 2.4 Playlist Screen
@@ -411,6 +412,9 @@ Appears above the bottom bar once a track is loaded. Height: `--mini-h` (64 px).
 - Artwork is 240×240 px, rounded 16 px, with an accent glow.
 - Timeline is a draggable `<input type="range">` with elapsed/total labels;
   dragging updates the label immediately and seeks on release.
+- The total length comes from track metadata. If a track has no metadata and
+  playback uses the AAC relay, the doubled AVFoundation estimate is halved, so
+  the player never shows twice the real length.
 - When a trim is saved, the timeline and the mini-player progress describe the
   trimmed segment (`0:00 … trimmed length`); seeks are clamped to that range and
   playback advances to the next track at End.

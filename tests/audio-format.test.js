@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { chooseFormat } = require('../frontend/audio-format.js');
+const { chooseFormat, isIOS } = require('../frontend/audio-format.js');
 
 const IPHONE_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) '
   + 'AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148';
@@ -102,4 +102,15 @@ test('the Opus probe asks for WebM/Opus and nothing else', () => {
     maxTouchPoints: 0,
   });
   assert.deepEqual(probes, ['audio/webm; codecs="opus"']);
+});
+
+test('isIOS detects iPhone and iPadOS desktop mode', () => {
+  assert.equal(isIOS({ userAgent: IPHONE_UA, platform: 'iPhone', maxTouchPoints: 5 }), true);
+  assert.equal(isIOS({ userAgent: IPAD_DESKTOP_UA, platform: 'MacIntel', maxTouchPoints: 5 }), true);
+});
+
+test('isIOS leaves desktop and Android browsers alone', () => {
+  assert.equal(isIOS({ userAgent: CHROME_UA, platform: 'MacIntel', maxTouchPoints: 0 }), false);
+  assert.equal(isIOS({ userAgent: ANDROID_UA, platform: 'Linux armv8l', maxTouchPoints: 5 }), false);
+  assert.equal(isIOS(), false);
 });

@@ -5,7 +5,9 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const { pickDuration, positionState, progressRatio, shouldForceTrackEnd } = require('../../frontend/player-time.js');
+const {
+  durationHint, pickDuration, positionState, progressRatio, shouldForceTrackEnd,
+} = require('../../frontend/player-time.js');
 
 test('pickDuration: iOS reports doubled media duration', () => {
   assert.strictEqual(pickDuration(483, 242, 0), 242);
@@ -75,6 +77,24 @@ test('shouldForceTrackEnd: unknown media never forces', () => {
   assert.strictEqual(shouldForceTrackEnd(NaN, 242, 500), false);
 });
 
+test('durationHint: missing metadata on the iOS AAC relay halves the estimate', () => {
+  assert.strictEqual(durationHint(427, 0, true), 213.5);
+});
+
+test('durationHint: track metadata wins over the estimate', () => {
+  assert.strictEqual(durationHint(427, 214, true), 214);
+});
+
+test('durationHint: non-Apple AAC keeps no hint without metadata', () => {
+  assert.strictEqual(durationHint(427, 0, false), 0);
+});
+
+test('durationHint: no media duration yields no hint', () => {
+  assert.strictEqual(durationHint(0, 0, true), 0);
+  assert.strictEqual(durationHint(NaN, 0, true), 0);
+  assert.strictEqual(durationHint(Infinity, 0, true), 0);
+});
+
 test('progressRatio: halfway', () => {
   assert.strictEqual(progressRatio(121, 242), 0.5);
 });
@@ -132,4 +152,20 @@ test('app.js wiring uses the shared duration helper', () => {
     'iOS only honors prev/next handlers registered once playback is active');
   assert.doesNotMatch(source, /setActionHandler\('seek(?:backward|forward)'/,
     'seek handlers would replace prev/next on the iOS lock screen');
+});
+
+test('app.js corrects a missing track duration on the iOS AAC relay', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', '..', 'frontend', 'app.js'), 'utf8');
+  assert.match(source, /LammotAudioFormat\.isIOS\(/, 'app.js must detect the Apple media stack');
+  assert.match(source, /durationHint\(/, 'app.js must use the shared duration hint');
+  assert.match(
+    source,
+    /function playbackDuration\(\) \{\s*return pickDuration\(audio\.duration, durationHintSeconds\(\), audio\.currentTime\);/,
+    'playbackDuration() must pass the hinted duration to pickDuration()',
+  );
+  assert.match(
+    source,
+    /const track = durationHintSeconds\(\);[\s\S]{0,160}shouldForceTrackEnd\(audio\.duration, track, audio\.currentTime\)/,
+    'the forced track end must use the hinted duration too',
+  );
 });

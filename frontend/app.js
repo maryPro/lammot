@@ -39,7 +39,6 @@
     search: '<circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/>',
     close: '<path d="M6 6l12 12M18 6L6 18"/>',
     plus: '<path d="M12 5v14M5 12h14"/>',
-    check: '<path d="M5 12.5l4.5 4.5L19 7.5"/>',
     more: '<circle cx="5" cy="12" r="1.6" class="solid"/><circle cx="12" cy="12" r="1.6" class="solid"/><circle cx="19" cy="12" r="1.6" class="solid"/>',
     back: '<path d="M15 5l-7 7 7 7"/>',
     chevron: '<path d="M9 5l7 7-7 7"/>',
@@ -340,21 +339,15 @@
     }
   }
 
-  function favButton(track, mode) {
-    const add = mode === 'add';
+  function favButton(track) {
     const btn = h('button', {
-      class: 'fav-btn' + (add ? ' fav-add' : ''),
+      class: 'fav-btn',
       type: 'button',
       'data-fav': track.video_id,
-      'data-fav-mode': add ? 'add' : 'toggle',
     });
     setFavButton(btn, track);
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
-      if (add) {
-        if (!isFavorite(track.video_id)) addFavorite(track, btn);
-        return;
-      }
       if (isFavorite(track.video_id)) removeFavorite(track);
       else addFavorite(track, btn);
     });
@@ -364,13 +357,6 @@
   function setFavButton(btn, track) {
     const fav = isFavorite(track.video_id);
     btn.classList.toggle('is-fav', fav);
-    if (btn.dataset.favMode === 'add') {
-      btn.replaceChildren(icon(fav ? 'check' : 'plus'));
-      btn.setAttribute('aria-label', fav ? `${track.title} is in Favorites` : `Add ${track.title} to Favorites`);
-      btn.setAttribute('aria-pressed', fav ? 'true' : 'false');
-      btn.setAttribute('aria-disabled', fav ? 'true' : 'false');
-      return;
-    }
     btn.replaceChildren(icon(fav ? 'heartFilled' : 'heart'));
     btn.setAttribute('aria-label', fav ? `Remove ${track.title} from Favorites` : `Add ${track.title} to Favorites`);
     btn.setAttribute('aria-pressed', fav ? 'true' : 'false');
@@ -426,12 +412,10 @@
       track.kind === 'video' ? h('span', { class: 'track-badge', text: 'Video' }) : null,
       duration ? h('span', { class: 'track-dur', text: fmtTime(duration) }) : null);
     if (player.current && player.current.video_id === track.video_id) row.classList.add('is-current');
-    if (opts.variant === 'search') {
-      row.append(favButton(track, 'add'));
-    } else if (opts.variant === 'shared' || opts.variant === 'favorites'
-        || opts.variant === 'album' || opts.variant === 'artist') {
-      row.append(favButton(track));
-    }
+    // Every list except the playlist screen shows a heart: search rows used to
+    // draw a filled plus/check circle, but the heart is now the one control
+    // for adding and removing favorites everywhere.
+    if (opts.variant !== 'playlist') row.append(favButton(track));
 
     const more = h('button', { class: 'icon-btn more-btn', type: 'button', 'aria-label': `More actions for ${track.title}` }, icon('more'));
     more.addEventListener('click', (e) => { e.stopPropagation(); openTrackMenu(track, opts); });
@@ -1145,7 +1129,7 @@
       if (!all.length) {
         return h('div', { class: 'state-msg' },
           h('strong', { text: 'No favorites yet' }),
-          'Tap + next to a song in search to save it here.');
+          'Tap the heart next to a song in search to save it here.');
       }
       const field = h('div', { class: 'search-field filter-field' }, icon('search'));
       const input = h('input', {
@@ -1544,10 +1528,24 @@
     } catch (_) { /* the safest format wins */ }
     return 'aac';
   })();
+  const IOS_MEDIA = (() => {
+    try {
+      if (window.LammotAudioFormat && window.LammotAudioFormat.isIOS) {
+        return window.LammotAudioFormat.isIOS({
+          userAgent: navigator.userAgent,
+          platform: navigator.platform,
+          maxTouchPoints: navigator.maxTouchPoints,
+        });
+      }
+    } catch (_) { /* unknown platform: never halve a duration */ }
+    return false;
+  })();
   // Survives per-track resets: once a format is known to work here, every
   // later track and prefetch asks for it instead of paying a second resolve.
   let preferredFormat = AUDIO_FORMAT;
-  const { pickDuration, positionState, progressRatio, shouldForceTrackEnd } = window.LammotTime;
+  const {
+    durationHint, pickDuration, positionState, progressRatio, shouldForceTrackEnd,
+  } = window.LammotTime;
   const PlaybackView = window.LammotPlaybackView;
 
   // A play() call made directly inside a tap "unlocks" the <audio> element;
@@ -1594,9 +1592,19 @@
 
   // Track metadata is the source of truth: some iOS webviews report a
   // doubled media duration. Fall back to the media element only when the
-  // track has no duration or playback runs past it.
+  // track has no duration or playback runs past it. Without metadata on the
+  // iOS AAC relay, the estimate is halved so the player never shows 2× the
+  // real length (AVFoundation parses the fragmented MP4 with no duration).
+  function durationHintSeconds() {
+    return durationHint(
+      audio.duration,
+      player.current && player.current.duration_seconds,
+      IOS_MEDIA && player.format === 'aac'
+    );
+  }
+
   function playbackDuration() {
-    return pickDuration(audio.duration, player.current && player.current.duration_seconds, audio.currentTime);
+    return pickDuration(audio.duration, durationHintSeconds(), audio.currentTime);
   }
 
   // The trim sheet and progress UI use the selected segment as the visible
@@ -2322,7 +2330,7 @@
         }
         return;
       }
-      const track = player.current && player.current.duration_seconds;
+      const track = durationHintSeconds();
       if (!player.loading && shouldForceTrackEnd(audio.duration, track, audio.currentTime)) {
         // iOS reports a doubled duration and keeps ticking through silence
         // after the real end, so "ended" may never arrive on time.
