@@ -27,7 +27,7 @@
   const DEFAULT_ACCENT = '#BC13FE';
   const SEARCH_MIN_CHARS = 2;
   const QUEUE_VISIBLE = 5;
-  const PREFETCH_SECONDS = 15;     // resolve the next song this long before the end
+  const PREFETCH_SECONDS = 15;     // retry the next-song resolve this long before the end
   const RADIO_BATCH = 5;
   const MAX_FAILED_IN_ROW = 3;
   const LINK_LIFETIME_MS = 5 * 60 * 60 * 1000;  // server signs audio links for 6 h
@@ -1359,6 +1359,7 @@
     links: new Map(),   // `${video_id}:${format}` → { url, expires }
     inflight: new Map(), // `${video_id}:${format}` → { promise, prefetch }
     refilling: false,
+    refillPromise: null, // shared in-flight radio refill (next waits for it)
     recorded: false,
     format: preferredFormat,
     triedFallback: false,
@@ -1416,9 +1417,10 @@
     const cached = player.links.get(key);
     if (cached && cached.expires > Date.now()) return cached.url;
     const pending = player.inflight.get(key);
-    // Share a request of the same or higher priority.  A tap must not wait
-    // behind a background warm-up, so it starts its own interactive request.
-    if (pending && (prefetch || !pending.prefetch)) return pending.promise;
+    // The key includes the video id and format, so an in-flight request is
+    // always for exactly this track.  Reuse it even for a tap: a second
+    // resolve would duplicate the extraction and can trigger a bot check.
+    if (pending) return pending.promise;
 
     const warm = prefetch ? '&prefetch=1' : '';
     const request = api(`/api/stream/${encodeURIComponent(track.video_id)}?format=${format}${warm}`)
@@ -1471,6 +1473,24 @@
     runPrefetchQueue();
   }
 
+  // The next track is warmed for the whole current track, not just its last
+  // seconds, so a tap on "next" finds the stream already resolved.
+  function prefetchUpcoming() {
+    const upcoming = player.queue[0];
+    if (!upcoming || player.botCheck) return;
+    prefetchTrack(upcoming);
+  }
+
+  // Called synchronously before any network wait: the previous track must not
+  // keep sounding while the new one loads.  The first-tap unlock clip is
+  // exempt because pausing it can lose the media permission on iOS.
+  function stopPlaybackNow() {
+    player.playing = false;
+    try {
+      if (!audio.paused && !isSilent()) audio.pause();
+    } catch (_) { /* ignore */ }
+  }
+
   function setLoading(on) {
     player.loading = on;
     $('mini-player').classList.toggle('is-loading', on);
@@ -1480,6 +1500,7 @@
 
   async function startTrack(track, { remember = true } = {}) {
     unlockAudio();  // must run before the first await, while still inside the tap
+    stopPlaybackNow();  // the old track must not sound during the resolve
     prefetchQueue.length = 0;  // a tap must not compete with queued warm-ups
     const seq = ++player.loadSeq;
     if (remember && player.current) {
@@ -1637,40 +1658,57 @@
   }
 
   async function refillRadio(force) {
-    if (player.mode !== 'radio' || player.refilling || !player.current) return;
+    if (player.mode !== 'radio' || !player.current) return;
+    if (player.refilling) return player.refillPromise;
     if (!force && player.queue.length >= 2) return;
     player.refilling = true;
-    const seed = player.queue.length ? player.queue[player.queue.length - 1] : player.current;
-    const exclude = [...new Set([
-      player.current.video_id,
-      ...player.queue.map((t) => t.video_id),
-      ...player.history.slice(-20).map((t) => t.video_id),
-    ])].filter((id) => id !== seed.video_id).slice(0, 50);
-    const qs = new URLSearchParams({
-      limit: String(RADIO_BATCH),
-      kind: player.radioKind === 'video' ? 'video' : 'song',
-    });
-    exclude.forEach((id) => qs.append('exclude', id));
-    try {
-      const more = await api(`/api/radio/${encodeURIComponent(seed.video_id)}?${qs}`);
-      if (player.mode !== 'radio') return;
-      const have = new Set([player.current && player.current.video_id, ...player.queue.map((t) => t.video_id)]);
-      for (const t of more || []) {
-        if (!have.has(t.video_id)) { player.queue.push(t); have.add(t.video_id); }
+    const run = (async () => {
+      const seed = player.queue.length ? player.queue[player.queue.length - 1] : player.current;
+      const exclude = [...new Set([
+        player.current.video_id,
+        ...player.queue.map((t) => t.video_id),
+        ...player.history.slice(-20).map((t) => t.video_id),
+      ])].filter((id) => id !== seed.video_id).slice(0, 50);
+      const qs = new URLSearchParams({
+        limit: String(RADIO_BATCH),
+        kind: player.radioKind === 'video' ? 'video' : 'song',
+      });
+      exclude.forEach((id) => qs.append('exclude', id));
+      try {
+        const more = await api(`/api/radio/${encodeURIComponent(seed.video_id)}?${qs}`);
+        if (player.mode !== 'radio') return;
+        const have = new Set([player.current && player.current.video_id, ...player.queue.map((t) => t.video_id)]);
+        for (const t of more || []) {
+          if (!have.has(t.video_id)) { player.queue.push(t); have.add(t.video_id); }
+        }
+        renderQueue();
+        if (!force) prefetchUpcoming();
+      } catch (err) {
+        if (force) toast(err.message);
       }
-      renderQueue();
-    } catch (err) {
-      if (force) toast(err.message);
+    })();
+    player.refillPromise = run;
+    try {
+      await run;
     } finally {
       player.refilling = false;
+      player.refillPromise = null;
     }
   }
 
   async function next({ auto = false } = {}) {
     if (!player.current) return;
+    const switching = player.queue.length > 0 || player.mode === 'radio';
+    if (switching) {
+      // Stop before the refill/resolve awaits: the user asked to leave this
+      // track, and it must not keep playing while the next one loads.
+      stopPlaybackNow();
+      setLoading(true);
+    }
     if (!player.queue.length && player.mode === 'radio') await refillRadio(true);
     const upcoming = player.queue.shift();
     if (!upcoming) {
+      if (switching) setLoading(false);
       if (auto) {
         audio.pause();
         renderPlayState();
@@ -1685,11 +1723,13 @@
 
   function prev() {
     if (!player.current) return;
-    if (audio.currentTime > 3 || !player.history.length) {
+    if (!player.history.length) {
       const trim = currentTrim();
       audio.currentTime = trim.valid ? trim.start : 0;
       return;
     }
+    stopPlaybackNow();
+    setLoading(true);
     const previous = player.history.pop();
     player.queue.unshift(player.current);
     startTrack(previous, { remember: false });
@@ -2006,6 +2046,7 @@
       // again now that the session is active.
       bindMediaSession();
       syncMediaSessionPosition(true);
+      prefetchUpcoming();  // warm the next track from the start of this one
       if (player.current && !player.recorded) {
         player.recorded = true;
         api('/api/history', { method: 'POST', body: { kind: 'play', track: trackBody(player.current) } }).catch(() => {});
@@ -2038,7 +2079,8 @@
       }
       renderProgress(segmentPosition(), segmentDuration());
       syncMediaSessionPosition(false);
-      // Lazy resolve: get the next song's link ~15 s before this one ends
+      // Fallback warm-up: the next track is normally prefetched when this
+      // one starts; retry once near the end in case that request failed.
       const upcoming = player.queue[0];
       const remaining = trim.valid ? trim.end - audio.currentTime : full - audio.currentTime;
       if (upcoming && !player.botCheck && (trim.valid || full > 0)
