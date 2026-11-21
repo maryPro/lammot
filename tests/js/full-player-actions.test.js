@@ -9,19 +9,28 @@ const app = fs.readFileSync(path.join(__dirname, '..', '..', 'frontend', 'app.js
 const html = fs.readFileSync(path.join(__dirname, '..', '..', 'frontend', 'index.html'), 'utf8');
 const css = fs.readFileSync(path.join(__dirname, '..', '..', 'frontend', 'style.css'), 'utf8');
 
-function controlsMarkup() {
-  const start = html.indexOf('<div class="fp-controls">');
-  assert.notStrictEqual(start, -1, 'index.html must contain the full-player controls');
-  const end = html.indexOf('</div>', start);
-  assert.notStrictEqual(end, -1, 'the full-player controls block must be closed');
+function between(startMarker, endMarker) {
+  const start = html.indexOf(startMarker);
+  assert.notStrictEqual(start, -1, `index.html must contain ${startMarker}`);
+  const end = html.indexOf(endMarker, start);
+  assert.notStrictEqual(end, -1, `index.html must contain ${endMarker} after ${startMarker}`);
   return html.slice(start, end);
 }
 
-test('the full-player row orders more, previous, play, next, favorite', () => {
-  const block = controlsMarkup();
-  const ids = ['fp-more', 'fp-prev', 'fp-play', 'fp-next', 'fp-fav'];
+test('the player top row holds close and more actions', () => {
+  const top = between('<div class="fp-top">', '<div class="fp-art-wrap">');
+  const close = top.indexOf('id="fp-close"');
+  const more = top.indexOf('id="fp-more"');
+  assert.notStrictEqual(close, -1, 'the top row must keep the close chevron');
+  assert.notStrictEqual(more, -1, 'the top row must hold the more-actions button');
+  assert.ok(close < more, 'the more button must be the right-most top action');
+});
+
+test('the transport row keeps only previous, play, next', () => {
+  const controls = between('<div class="fp-controls">', '<section class="fp-queue"');
+  const ids = ['fp-prev', 'fp-play', 'fp-next'];
   const positions = ids.map((id) => {
-    const pos = block.indexOf(`id="${id}"`);
+    const pos = controls.indexOf(`id="${id}"`);
     assert.notStrictEqual(pos, -1, `the controls must include #${id}`);
     return pos;
   });
@@ -31,6 +40,22 @@ test('the full-player row orders more, previous, play, next, favorite', () => {
       `#${ids[i - 1]} must come before #${ids[i]}`,
     );
   }
+  assert.doesNotMatch(controls, /id="fp-more"/,
+    'the more button must leave the transport row');
+  assert.doesNotMatch(controls, /id="fp-fav"/,
+    'the favorite heart must leave the transport row');
+});
+
+test('the player heart sits beside the track title', () => {
+  const meta = between('<div class="fp-meta">', '<div class="fp-timeline">');
+  const title = meta.indexOf('id="fp-title"');
+  const artist = meta.indexOf('id="fp-artist"');
+  const fav = meta.indexOf('id="fp-fav"');
+  assert.notStrictEqual(title, -1, 'the meta row must keep the title');
+  assert.notStrictEqual(artist, -1, 'the meta row must keep the artist');
+  assert.notStrictEqual(fav, -1, 'the meta row must hold the favorite heart');
+  assert.ok(title < artist && artist < fav,
+    'the heart must follow the title and artist');
 });
 
 test('renderPlayer syncs the player heart and labels the more button', () => {
@@ -79,11 +104,18 @@ test('the player menu omits Play next and favorite items', () => {
     'favorite items must be skipped for the player menu');
 });
 
-test('the five-button row stays compact', () => {
-  assert.match(css, /\.fp-controls \{[^}]*gap: var\(--spacing-sm\);/,
-    'the player row must use the small gap');
+test('the top and meta rows spread their actions to the edges', () => {
+  assert.match(css, /\.fp-top \{[^}]*display: flex;[^}]*justify-content: space-between;/,
+    'the top row must push close left and more right');
+  assert.match(css, /\.fp-meta \{[^}]*display: flex;[^}]*align-items: center;[^}]*justify-content: space-between;/,
+    'the meta row must push the heart to the right of the title');
+});
+
+test('the transport and meta buttons keep their sizes', () => {
   assert.match(css, /\.fp-skip \{\s*width: 44px;\s*height: 44px;\s*\}/,
     'skip buttons must be 44px');
-  assert.match(css, /\.fp-action,\s*\.fp-fav \{\s*width: 40px;\s*height: 40px;/,
-    'secondary player actions must be 40px');
+  assert.match(css, /\.fp-fav \{\s*width: 44px;\s*height: 44px;/,
+    'the meta heart must keep a 44px hit target');
+  assert.match(css, /\.fp-fav \.icon \{\s*width: 28px;\s*height: 28px;\s*\}/,
+    'the meta heart glyph must stay readable without a background');
 });

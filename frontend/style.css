@@ -341,19 +341,15 @@ body.has-mini .app {
 
 .fav-btn {
   flex: none;
-  width: 32px;
-  height: 32px;
+  width: 36px;
+  height: 36px;
   display: grid;
   place-items: center;
   border-radius: var(--radius-pill);
-  background: var(--accent);
-  color: var(--on-accent);
-}
-.fav-btn .icon { width: 20px; height: 20px; stroke-width: 2.4; }
-.fav-btn.is-fav {
-  background: var(--bg-secondary);
+  background: none;
   color: var(--accent);
 }
+.fav-btn .icon { width: 24px; height: 24px; stroke-width: 2.2; }
 .fav-btn:active { transform: scale(0.92); }
 .more-btn { width: 36px; height: 36px; color: var(--text-secondary); }
 
@@ -580,7 +576,8 @@ body.has-mini .app {
 .fp-top {
   position: relative;
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
   padding-top: var(--spacing-sm);
 }
 .fp-grabber {
@@ -611,7 +608,14 @@ body.has-mini .app {
 }
 .full-player:not(.is-playing) .fp-art { transform: scale(0.94); }
 
-.fp-meta { margin-bottom: var(--spacing-md); }
+.fp-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-md);
+  margin-bottom: var(--spacing-md);
+}
+.fp-meta-text { flex: 1; min-width: 0; }
 .fp-title {
   font-size: 18px;
   font-weight: var(--font-weight-bold);
@@ -668,18 +672,18 @@ body.has-mini .app {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: var(--spacing-sm);
+  gap: var(--spacing-md);
   padding: var(--spacing-sm) 0 var(--spacing-lg);
 }
-.fp-action,
-.fp-fav {
+.fp-action {
   width: 40px;
   height: 40px;
   flex: none;
+  color: var(--text-secondary);
 }
-.fp-action { color: var(--text-secondary); }
 .fp-action .icon { width: 20px; height: 20px; }
-.fp-fav .icon { width: 22px; height: 22px; }
+.fp-fav { width: 44px; height: 44px; flex: none; }
+.fp-fav .icon { width: 28px; height: 28px; }
 .fp-skip { width: 44px; height: 44px; }
 .fp-skip .icon { width: 24px; height: 24px; }
 .fp-play {

@@ -158,8 +158,9 @@ Track card:
 - The row itself starts playback.
 - Extended results show a compact `Video` badge immediately to the left of the
   duration; song rows have no badge.
-- Search and shared-playlist rows show the favorite button: an outlined `♡`
-  to add, a filled `♥` (accent colour) when already saved.
+- Search and shared-playlist rows show the favorite button: an accent-coloured
+  outlined `♡` (no filled circle) to add, the same heart filled with the accent
+  colour when the track is already saved.
 - Tapping a filled heart removes the track from Favorites and returns the
   button to the outlined state.
 - The `⋯` more-actions button opens a sheet:
@@ -218,7 +219,7 @@ Track card:
 │ ←  My Favorites         │
 │  🔍 Search in Favorites │
 │─────────────────────────│
-│ [thumb] Title       ⋯   │
+│ [thumb] Title     ♥   ⋯ │
 │         Artist          │
 │         3:45            │
 │─────────────────────────│
@@ -228,8 +229,8 @@ Track card:
 
 - Tracks are ordered **newest first**.
 - “Search in Favorites” filters by title and artist.
-- Rows have no favorite button (the track is already saved), but keep the `⋯`
-  menu.
+- Rows show the same filled accent heart as elsewhere; tapping it removes the
+  track from Favorites. They also keep the `⋯` menu.
 - Playback uses list mode: next track in the filtered list, no radio, and it
   stops after the last track.
 - Empty state: “No favorites yet — Tap ♡ next to a song in search to save it
@@ -305,15 +306,15 @@ Appears above the bottom bar once a track is loaded. Height: `--mini-h` (64 px).
 
 ```
 ┌─────────────────────────┐
-│            ⌄            │  ← chevron close, or swipe down
+│  ⌄                    ⋯ │  ← chevron close, or swipe down
 │  ┌─────────────────┐    │
 │  │    Artwork      │    │  ← 240×240, rounded 16px
 │  └─────────────────┘    │
-│  Title                  │
+│  Title              ♡   │  ← favorite toggle
 │  Artist                 │
 │  ━━━━━━●────────────    │  ← draggable range input
 │  1:23              3:45 │
-│   ⋯    ⏮    ⏯    ⏭    ♡   │
+│        ⏮   ⏯   ⏭        │
 │─────────────────────────│
 │  Up next   Radio: …     │  ← source label
 │  1. Next Track       ×  │
@@ -322,13 +323,16 @@ Appears above the bottom bar once a track is loaded. Height: `--mini-h` (64 px).
 └─────────────────────────┘
 ```
 
-- `⋯` left of Previous opens current-track actions: **Trim playback** and
+- `⋯` in the top-right opens current-track actions: **Trim playback** and
   **Add to playlist**. It does not offer **Play next** for the current track
   or duplicate the favorite action.
-- `♡` right of Next adds the current track to Favorites; `♥` removes it and
-  syncs with every other visible heart.
-- The five controls use 40 px secondary actions, 44 px skip buttons, and a
-  68 px play button; the row fits a 320 px viewport.
+- `♡` beside the track title adds the current track to Favorites; the same
+  heart filled with the accent colour removes it and syncs with every other
+  visible heart. The heart has no circular background: the accent colour draws
+  the outline, and the accent fill marks the saved state.
+- The transport row is centred and holds only Previous, Play/Pause, and Next
+  (44 px skips and a 68 px play button). The top action is 40 px and the heart
+  keeps a 44 px hit target.
 - Close via swipe down or the chevron button; there is no cross-style close control.
 - Artwork is 240×240 px, rounded 16 px, with an accent glow.
 - Timeline is a draggable `<input type="range">` with elapsed/total labels;

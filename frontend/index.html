@@ -91,6 +91,9 @@
         <button class="icon-btn" id="fp-close" type="button" aria-label="Close player">
           <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
         </button>
+        <button class="icon-btn fp-action" id="fp-more" type="button" aria-label="More actions" aria-haspopup="dialog">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.6" class="solid"/><circle cx="12" cy="12" r="1.6" class="solid"/><circle cx="19" cy="12" r="1.6" class="solid"/></svg>
+        </button>
       </div>
 
       <div class="fp-art-wrap">
@@ -98,8 +101,11 @@
       </div>
 
       <div class="fp-meta">
-        <h1 class="fp-title" id="fp-title"></h1>
-        <p class="fp-artist" id="fp-artist"></p>
+        <div class="fp-meta-text">
+          <h1 class="fp-title" id="fp-title"></h1>
+          <p class="fp-artist" id="fp-artist"></p>
+        </div>
+        <button class="fav-btn fp-fav" id="fp-fav" type="button" aria-label="Add to Favorites" aria-pressed="false"></button>
       </div>
 
       <div class="fp-timeline">
@@ -108,9 +114,6 @@
       </div>
 
       <div class="fp-controls">
-        <button class="icon-btn fp-action" id="fp-more" type="button" aria-label="More actions" aria-haspopup="dialog">
-          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.6" class="solid"/><circle cx="12" cy="12" r="1.6" class="solid"/><circle cx="19" cy="12" r="1.6" class="solid"/></svg>
-        </button>
         <button class="icon-btn fp-skip" id="fp-prev" type="button" aria-label="Previous song">
           <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 5.5v13l-9-6.5z" class="solid"/><path d="M6 5v14"/></svg>
         </button>
@@ -121,7 +124,6 @@
         <button class="icon-btn fp-skip" id="fp-next" type="button" aria-label="Next song">
           <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5.5v13l9-6.5z" class="solid"/><path d="M18 5v14"/></svg>
         </button>
-        <button class="fav-btn fp-fav" id="fp-fav" type="button" aria-label="Add to Favorites" aria-pressed="false"></button>
       </div>
 
       <section class="fp-queue" aria-labelledby="fp-queue-title">
