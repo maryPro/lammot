@@ -1,7 +1,7 @@
 # Lammot — Project Status
 
 Last updated: 2026-11-21
-Verified against: `main @ 783b41d`
+Verified against: `main @ 8c2bcc9`
 Maintained by: Project Manager / Architect
 
 > Read this first for current state. Use [ARCHITECTURE.md](../ARCHITECTURE.md)
@@ -22,6 +22,7 @@ Maintained by: Project Manager / Architect
 | Cold-start fast path (`cold-start`) | Developer (cold-start worktree) | Implemented, tests green; pending deploy/verification | Deploy and compare `resolve_ms`; watch player-cache reuse and prune logs | 2026-11-20 |
 | Search-prefetch latency and log-hygiene fix (`PREFETCH-001`, `PREFETCH-002`) | Developer (fix-prefetch worktree) | Follow-up implemented, tests green; pending deploy/verification | Deploy and repeat the production-timing check | 2026-11-20 |
 | Player loading state: remove the dimmed intermediate Pause (`PLAYER-001`) | Developer (remove-pause worktree) | Merged in PR #34; manual verification pending | Verify in a real Telegram WebView; confirm spinner, no dimmed Pause, and Pause only after playback | 2026-11-21 |
+| Playback trimming — non-destructive start/end (`edit-track`) | Developer (edit-track worktree) | Implemented, full non-integration and JS suites green; pending manual verification and PR | Verify trim sheet, preview, trimmed progress/seek, and shared-playlist isolation in a real Telegram WebView | 2026-11-21 |
 
 ## Known bugs
 
@@ -47,6 +48,7 @@ Maintained by: Project Manager / Architect
 
 | Date | Decision | Why | Evidence |
 |---|---|---|---|
+| 2026-11-21 | Playback trims are per-user metadata (`track_trims`), not media edits; playback starts at Start and advances at End, and shared playlists do not share trims | Let users cut trailing silence or pick a favourite part without downloading, copying, or re-encoding audio | `app/database.py`, `app/main.py`, `frontend/trim-range.js`, `frontend/app.js` |
 | 2026-11-21 | Songs stays the default search; Extended is opt-in video search with a 45–900 s duration window, and video radio is seeded by the selected video | Remixes and fan uploads are regular YouTube videos that `filter="songs"` never returns; duration is a reliable contract where title heuristics are not | `app/search.py`, `app/radio.py`, `frontend/search-tabs.js` |
 | 2026-11-21 | Playback icon is driven by actual `playing` state, with a spinner during load | The `play` event fires before audio is audible; an explicit state avoids the dimmed Pause stage | `frontend/playback-view.js`, `frontend/app.js`, PR #34 |
 | 2026-11-17 | Background search prefetch is enabled by default: top 3 results, queue size 12, one worker, stale searches dropped | Warm the resolver cache without delaying search responses or queueing a tap behind prefetch work | `app/prefetch.py`, `app/main.py`, PR #18–#19 |
@@ -65,6 +67,7 @@ Maintained by: Project Manager / Architect
 | Date | Change | Commit / PR |
 |---|---|---|
 | 2026-11-21 | Extended search: Songs/Extended tabs, video search, video radio | `56ad376` (#38) |
+| 2026-11-21 | Playback trimming: per-user start/end metadata, trim sheet with preview, trimmed progress/seek/MediaSession | `edit-track` branch (pending PR) |
 | 2026-11-21 | Extended tabs centered and Video badge placed before duration | `783b41d` (#39) |
 | 2026-11-21 | Player loading state: spinner during load; Pause only after actual playback | `f181d9d` (#34) |
 | 2026-11-17 | Background prefetch of top search results | `66f6929` (#18) |
@@ -79,6 +82,10 @@ Maintained by: Project Manager / Architect
 
 ## Next up
 
+- Manually verify playback trimming in a real Telegram WebView: set Start/End,
+  preview stops at End, progress/seek use the trimmed length, the next track
+  starts at End, Reset restores the full track, shared playlists do not expose
+  the owner’s trim, and **Delete all my data** removes trims.
 - Validate Extended search in production: search `kirman lost`, confirm the
   9:29 remix is playable, the `Video` badge is visible, video radio works, and
   long videos stay out of the queue.

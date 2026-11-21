@@ -2,8 +2,8 @@
 app/database.py — Sprint 5: SQLite storage via aiosqlite
 LammotBot Telegram Mini App Music Player
 
-Stores users, favorites, playlists, search/play history and two caches
-(stream URLs, track_key -> video_id).
+Stores users, favorites, playlists, search/play history, per-user playback
+trims and two caches (stream URLs, track_key -> video_id).
 
 Rules this module follows:
   - DB path comes from DATABASE_PATH (default ./lammot.db), read on every
@@ -120,6 +120,16 @@ CREATE TABLE IF NOT EXISTS play_history (
     played_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_play_history_user ON play_history(telegram_user_id, id);
+
+CREATE TABLE IF NOT EXISTS track_trims (
+    telegram_user_id INTEGER NOT NULL
+        REFERENCES users(telegram_user_id) ON DELETE CASCADE,
+    video_id TEXT NOT NULL,
+    start_seconds REAL NOT NULL DEFAULT 0 CHECK (start_seconds >= 0),
+    end_seconds REAL CHECK (end_seconds IS NULL OR end_seconds > start_seconds),
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (telegram_user_id, video_id)
+);
 
 -- No personal data below: shared caches, not tied to a user
 CREATE TABLE IF NOT EXISTS stream_cache (
@@ -370,6 +380,59 @@ async def add_played_track(
             ")",
             (telegram_user_id, telegram_user_id, PLAY_HISTORY_LIMIT),
         )
+
+
+# ---------------------------------------------------------------------------
+# Playback trims (per user, per video; playback-only metadata)
+# ---------------------------------------------------------------------------
+async def get_trims(telegram_user_id: int) -> List[Dict[str, Any]]:
+    """All playback trims of one user, newest first."""
+    async with _connect() as db:
+        return await _fetchall(
+            db,
+            "SELECT video_id, start_seconds, end_seconds FROM track_trims "
+            "WHERE telegram_user_id = ? ORDER BY updated_at DESC, rowid DESC",
+            (telegram_user_id,),
+        )
+
+
+async def upsert_trim(
+    telegram_user_id: int,
+    video_id: str,
+    start_seconds: float,
+    end_seconds: Optional[float],
+) -> Dict[str, Any]:
+    """Create or replace the trim for one video. Returns the saved row."""
+    async with _transaction() as db:
+        await db.execute(
+            "INSERT INTO track_trims (telegram_user_id, video_id, start_seconds, end_seconds) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(telegram_user_id, video_id) DO UPDATE SET "
+            "start_seconds = excluded.start_seconds, "
+            "end_seconds = excluded.end_seconds, "
+            "updated_at = CURRENT_TIMESTAMP",
+            (telegram_user_id, video_id, start_seconds, end_seconds),
+        )
+        row = await _fetchone(
+            db,
+            "SELECT video_id, start_seconds, end_seconds FROM track_trims "
+            "WHERE telegram_user_id = ? AND video_id = ?",
+            (telegram_user_id, video_id),
+        )
+    assert row is not None
+    return row
+
+
+async def delete_trim(telegram_user_id: int, video_id: str) -> bool:
+    """Remove one trim. Returns False when this user has no trim for the video."""
+    async with _transaction() as db:
+        cur = await db.execute(
+            "DELETE FROM track_trims WHERE telegram_user_id = ? AND video_id = ?",
+            (telegram_user_id, video_id),
+        )
+        removed = cur.rowcount > 0
+        await cur.close()
+    return removed
 
 
 # ---------------------------------------------------------------------------
@@ -638,6 +701,7 @@ async def delete_user_data(telegram_user_id: int) -> bool:
         await db.execute("DELETE FROM favorites WHERE telegram_user_id = ?", (telegram_user_id,))
         await db.execute("DELETE FROM search_history WHERE telegram_user_id = ?", (telegram_user_id,))
         await db.execute("DELETE FROM play_history WHERE telegram_user_id = ?", (telegram_user_id,))
+        await db.execute("DELETE FROM track_trims WHERE telegram_user_id = ?", (telegram_user_id,))
         cur = await db.execute("DELETE FROM users WHERE telegram_user_id = ?", (telegram_user_id,))
         existed = cur.rowcount > 0
         await cur.close()

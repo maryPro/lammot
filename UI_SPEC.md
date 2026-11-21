@@ -162,6 +162,7 @@ Track card:
   (checked, greyed) when already saved.
 - The `⋯` more-actions button opens a sheet:
   - **Play next** — only when a track is already loaded.
+  - **Trim playback** — opens the trim sheet for this track.
   - **Add to playlist** — opens the playlist picker, including “New playlist…”.
   - **Add to Favorites** or **Remove from Favorites** — reflects current state.
   - **Remove from this playlist** — only in the playlist screen, marked danger.
@@ -172,6 +173,39 @@ Track card:
     switches to the Extended tab and reruns the same query.
   - **Extended** — “No videos under 15:00 found. Try a different query or
     switch back to Songs.”
+
+### 2.2.1 Trim Playback Sheet
+
+```
+┌─────────────────────────┐
+│ Trim playback           │
+│ Title · Artist          │
+│ 0:42 – 2:15             │
+│ Start ━━━━●──────────   │
+│ End   ━━━━━━━━●──────   │
+│ [ Preview ]             │
+│ [ Save ]                │
+│ [ Reset trim ]          │
+│ [ Cancel ]              │
+└─────────────────────────┘
+```
+
+- Opened from `⋯` → **Trim playback** for any track (search, Favorites,
+  playlists, shared playlists).
+- Sliders show absolute full-track positions (`0:00 … duration`); step is 0.5 s.
+- Range label shows the selected `Start – End`.
+- **Save** is disabled while the range is inverted, shorter than 1 s, or the
+  track duration is unknown; a short hint explains why.
+- **Preview** pauses the main player and plays only the selected range through a
+  hidden second `<audio>` element. It stops at End and never changes the queue,
+  history, or MediaSession state.
+- **Reset trim** appears only when a trim already exists and removes it.
+- Save/Reset/Cancel stop the preview, close the sheet, and resume the main player
+  only if it was playing before the sheet opened.
+- A saved trim applies to the same `video_id` everywhere for this user. Shared
+  playlists do not share trims: recipients hear their own trim or the full track.
+- **Track duration unavailable** replaces the controls when the duration is not
+  known.
 
 ### 2.3 Favorites Screen
 
@@ -288,6 +322,9 @@ Appears above the bottom bar once a track is loaded. Height: `--mini-h` (64 px).
 - Artwork is 240×240 px, rounded 16 px, with an accent glow.
 - Timeline is a draggable `<input type="range">` with elapsed/total labels;
   dragging updates the label immediately and seeks on release.
+- When a trim is saved, the timeline and the mini-player progress describe the
+  trimmed segment (`0:00 … trimmed length`); seeks are clamped to that range and
+  playback advances to the next track at End.
 - Queue shows 5 tracks. Items are numbered and clickable to jump to that track;
   a remove control removes an item from the queue.
 - Source label shows `Radio: similar songs`, `Radio: similar videos`,
