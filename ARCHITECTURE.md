@@ -3,7 +3,7 @@
 **Telegram Mini App Music Player**
 Version: 1.5 | Stack: Python + FastAPI + SQLite + HTML/CSS/JS | Deploy: Docker on Railway
 
-Last verified against: `main @ 783b41d` (2026-11-21)
+Last verified against: `main @ 2bc0774` (2026-11-21)
 Project status: [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)
 
 ---

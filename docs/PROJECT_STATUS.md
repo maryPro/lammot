@@ -1,7 +1,7 @@
 # Lammot — Project Status
 
 Last updated: 2026-11-21
-Verified against: `main @ 8c2bcc9`
+Verified against: `main @ 2bc0774`
 Maintained by: Project Manager / Architect
 
 > Read this first for current state. Use [ARCHITECTURE.md](../ARCHITECTURE.md)
@@ -11,8 +11,9 @@ Maintained by: Project Manager / Architect
 
 ## Current focus
 
-- Production verification of merged work: Extended search (#38/#39), the
-  player loading state (#34), and the deployed resolver/prefetch changes.
+- Production verification of recently merged playback work: trimming
+  (#41/#42), favourite hearts (#44/#45), next/previous behavior (#46),
+  Extended search (#38/#39), and the player loading state (#34).
 
 ## In progress
 
@@ -22,7 +23,7 @@ Maintained by: Project Manager / Architect
 | Cold-start fast path (`cold-start`) | Developer (cold-start worktree) | Implemented, tests green; pending deploy/verification | Deploy and compare `resolve_ms`; watch player-cache reuse and prune logs | 2026-11-20 |
 | Search-prefetch latency and log-hygiene fix (`PREFETCH-001`, `PREFETCH-002`) | Developer (fix-prefetch worktree) | Follow-up implemented, tests green; pending deploy/verification | Deploy and repeat the production-timing check | 2026-11-20 |
 | Player loading state: remove the dimmed intermediate Pause (`PLAYER-001`) | Developer (remove-pause worktree) | Merged in PR #34; manual verification pending | Verify in a real Telegram WebView; confirm spinner, no dimmed Pause, and Pause only after playback | 2026-11-21 |
-| Playback trimming — non-destructive start/end (`edit-track`) | Developer (edit-track worktree) | Implemented, full non-integration and JS suites green; pending manual verification and PR | Verify trim sheet, preview, trimmed progress/seek, and shared-playlist isolation in a real Telegram WebView | 2026-11-21 |
+| Playback trimming — non-destructive start/end (`edit-track`) | Developer (edit-track worktree) | Merged in #41/#42; manual verification pending | Verify trim sheet, preview, trimmed progress/seek, and shared-playlist isolation in a real Telegram WebView | 2026-11-21 |
 
 ## Known bugs
 
@@ -49,6 +50,8 @@ Maintained by: Project Manager / Architect
 | Date | Decision | Why | Evidence |
 |---|---|---|---|
 | 2026-11-21 | Playback trims are per-user metadata (`track_trims`), not media edits; playback starts at Start and advances at End, and shared playlists do not share trims | Let users cut trailing silence or pick a favourite part without downloading, copying, or re-encoding audio | `app/database.py`, `app/main.py`, `frontend/trim-range.js`, `frontend/app.js` |
+| 2026-11-21 | Favorites use heart buttons: outlined `♡` adds, filled `♥` removes; the Favorites tab and search menus follow the same state | Make the add/remove favourite action explicit and consistent across screens | `frontend/app.js`, `frontend/style.css`, `tests/js/favorite-heart.test.js`, #44/#45 |
+| 2026-11-21 | Next/previous stops the current track and warms the next one early | Avoid overlapping playback and reduce the gap before the next track | `frontend/app.js`, `tests/js/radio-skip.test.js`, #46 |
 | 2026-11-21 | Songs stays the default search; Extended is opt-in video search with a 45–900 s duration window, and video radio is seeded by the selected video | Remixes and fan uploads are regular YouTube videos that `filter="songs"` never returns; duration is a reliable contract where title heuristics are not | `app/search.py`, `app/radio.py`, `frontend/search-tabs.js` |
 | 2026-11-21 | Playback icon is driven by actual `playing` state, with a spinner during load | The `play` event fires before audio is audible; an explicit state avoids the dimmed Pause stage | `frontend/playback-view.js`, `frontend/app.js`, PR #34 |
 | 2026-11-17 | Background search prefetch is enabled by default: top 3 results, queue size 12, one worker, stale searches dropped | Warm the resolver cache without delaying search responses or queueing a tap behind prefetch work | `app/prefetch.py`, `app/main.py`, PR #18–#19 |
@@ -66,22 +69,16 @@ Maintained by: Project Manager / Architect
 
 | Date | Change | Commit / PR |
 |---|---|---|
-| 2026-11-21 | Favorites use heart buttons: outlined `♡` to add, filled `♥` to remove; the Favorites tab and menu use hearts, and search menus drop Add to Favorites | `4ca18a8` (#44) |
-| 2026-11-21 | Favorites polish: larger heart glyph in the button and a red Remove from Favorites action in search menus | `heart` branch (pending PR) |
-| 2026-11-21 | Clearing the search field resets an active Extended tab back to Songs | `fix-clear-in-search-field` branch (pending PR) |
-| 2026-11-21 | Extended search: Songs/Extended tabs, video search, video radio | `56ad376` (#38) |
-| 2026-11-21 | Playback trimming: per-user start/end metadata, trim sheet with preview, trimmed progress/seek/MediaSession | `edit-track` branch (pending PR) |
+| 2026-11-21 | Next/previous stops the current track and warms the next one early | `2bc0774` (#46) |
+| 2026-11-21 | Favorites polish: larger heart glyph and red Remove from Favorites action | `a047725` (#45) |
+| 2026-11-21 | Favorites use heart buttons: outlined `♡` to add, filled `♥` to remove | `4ca18a8` (#44) |
+| 2026-11-21 | Clearing the search field resets Extended back to Songs | `f33284b` (#43) |
+| 2026-11-21 | Show saved trim durations and keep playback when opening trim | `7304398` (#42) |
+| 2026-11-21 | Playback trimming: per-user start/end, preview, trimmed progress/seek/MediaSession | `6ba8107` (#41) |
 | 2026-11-21 | Extended tabs centered and Video badge placed before duration | `783b41d` (#39) |
+| 2026-11-21 | Extended search: Songs/Extended tabs, video search, video radio | `56ad376` (#38) |
+| 2026-11-21 | iOS lock-screen controls: previous/next and correct timeline | `364e9e8` (#35) |
 | 2026-11-21 | Player loading state: spinner during load; Pause only after actual playback | `f181d9d` (#34) |
-| 2026-11-17 | Background prefetch of top search results | `66f6929` (#18) |
-| 2026-11-17 | Prefetch survives pre-roll gates and drops stale searches | `e5ed6b2` (#19) |
-| 2026-11-17 | iOS track duration from metadata is authoritative | `5f3f392` (#20) |
-| 2026-11-17 | Ignore doubled iOS media duration and end tracks on time | `f2e5d4f` (#21) |
-| 2026-11-20 | Multi-agent workflow and TDD rules in `AGENTS.md` | `1056314` (#22) |
-| 2026-11-20 | Explicit-submit search: no search or prefetch while typing | PR #27 |
-| 2026-11-20 | Parallel prefetch of top-3 search results behind a flag | PR #28 |
-| 2026-11-20 | Combined `web + web_embedded` fast path and preprocessed player cache | `cold-start` branch (pending PR) |
-| 2026-11-20 | iOS lock-screen widget: previous/next buttons and the correct track timeline | `fix-system-widget-player-ios` branch (pending PR) |
 
 ## Next up
 
@@ -89,6 +86,9 @@ Maintained by: Project Manager / Architect
   preview stops at End, progress/seek use the trimmed length, the next track
   starts at End, Reset restores the full track, shared playlists do not expose
   the owner’s trim, and **Delete all my data** removes trims.
+- Manually verify favourite hearts and next/previous behavior: heart toggle
+  across search/favourites, red Remove action, current-track stop, and early
+  warm-up of the next track.
 - Validate Extended search in production: search `kirman lost`, confirm the
   9:29 remix is playable, the `Video` badge is visible, video radio works, and
   long videos stay out of the queue.
