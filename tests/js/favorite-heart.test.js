@@ -52,8 +52,10 @@ test('the favorite heart has no circular background', () => {
 });
 
 test('the Favorites screen rows keep a fillable heart', () => {
-  assert.match(app, /opts\.variant === 'search' \|\| opts\.variant === 'shared' \|\| opts\.variant === 'favorites'/,
+  assert.match(app, /opts\.variant === 'search'[\s\S]{0,160}opts\.variant === 'favorites'/,
     'Favorites rows must show the same heart so saved tracks can be unliked there');
+  assert.match(app, /opts\.variant === 'favorites'[\s\S]{0,80}opts\.variant === 'album'/,
+    'album rows must show the same heart');
 });
 
 test('the favorite heart is large enough to read without a background', () => {

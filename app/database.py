@@ -71,6 +71,7 @@ CREATE TABLE IF NOT EXISTS favorites (
     artist TEXT,
     duration INTEGER,
     thumbnail_url TEXT,
+    artist_id TEXT,
     added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(telegram_user_id, track_id)
 );
@@ -95,6 +96,7 @@ CREATE TABLE IF NOT EXISTS playlist_tracks (
     artist TEXT,
     duration INTEGER,
     thumbnail_url TEXT,
+    artist_id TEXT,
     position INTEGER NOT NULL,
     added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(playlist_id, track_id)
@@ -215,12 +217,24 @@ async def init_db() -> None:
         # WAL is stored in the file itself, so setting it once is enough
         await db.execute("PRAGMA journal_mode = WAL")
         await db.executescript(SCHEMA)
+        await _migrate_artist_id(db)
 
         # Some SQLite builds ship without FK support; cascades would then
         # silently do nothing. Fail at startup instead.
         row = await _fetchone(db, "PRAGMA foreign_keys", ())
         if not row or list(row.values())[0] != 1:
             raise RuntimeError("SQLite foreign key support is not available")
+
+
+async def _migrate_artist_id(db: aiosqlite.Connection) -> None:
+    """Add artist_id to pre-existing tables. Running it twice is a no-op."""
+    favorites_columns = await _fetchall(db, "PRAGMA table_info(favorites)", ())
+    if not any(column["name"] == "artist_id" for column in favorites_columns):
+        await db.execute("ALTER TABLE favorites ADD COLUMN artist_id TEXT")
+
+    playlist_columns = await _fetchall(db, "PRAGMA table_info(playlist_tracks)", ())
+    if not any(column["name"] == "artist_id" for column in playlist_columns):
+        await db.execute("ALTER TABLE playlist_tracks ADD COLUMN artist_id TEXT")
 
 
 # ---------------------------------------------------------------------------
@@ -273,7 +287,7 @@ async def get_favorites(telegram_user_id: int) -> List[Dict[str, Any]]:
     async with _connect() as db:
         return await _fetchall(
             db,
-            "SELECT track_id, title, artist, duration, thumbnail_url, added_at "
+            "SELECT track_id, title, artist, artist_id, duration, thumbnail_url, added_at "
             "FROM favorites WHERE telegram_user_id = ? ORDER BY id DESC",
             (telegram_user_id,),
         )
@@ -286,15 +300,16 @@ async def add_favorite(
     artist: Optional[str],
     duration: Optional[int],
     thumbnail_url: Optional[str],
+    artist_id: Optional[str] = None,
 ) -> bool:
     """Add a track. Returns False if it was already in favorites."""
     async with _transaction() as db:
         cur = await db.execute(
             "INSERT INTO favorites "
-            "(telegram_user_id, track_id, title, artist, duration, thumbnail_url) "
-            "VALUES (?, ?, ?, ?, ?, ?) "
+            "(telegram_user_id, track_id, title, artist, artist_id, duration, thumbnail_url) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(telegram_user_id, track_id) DO NOTHING",
-            (telegram_user_id, track_id, title, artist, duration, thumbnail_url),
+            (telegram_user_id, track_id, title, artist, artist_id, duration, thumbnail_url),
         )
         added = cur.rowcount == 1
         await cur.close()
@@ -521,7 +536,7 @@ async def get_playlist_tracks(telegram_user_id: int, playlist_id: int) -> List[D
         await _assert_owner(db, telegram_user_id, playlist_id)
         return await _fetchall(
             db,
-            "SELECT track_id, title, artist, duration, thumbnail_url, position, added_at "
+            "SELECT track_id, title, artist, artist_id, duration, thumbnail_url, position, added_at "
             "FROM playlist_tracks WHERE playlist_id = ? ORDER BY position, id",
             (playlist_id,),
         )
@@ -535,6 +550,7 @@ async def add_track_to_playlist(
     artist: Optional[str],
     duration: Optional[int],
     thumbnail_url: Optional[str],
+    artist_id: Optional[str] = None,
 ) -> bool:
     """Append a track to the end. Returns False if it is already in the playlist."""
     async with _transaction() as db:
@@ -548,10 +564,10 @@ async def add_track_to_playlist(
         next_pos = row["next_pos"] if row else 0
         cur = await db.execute(
             "INSERT INTO playlist_tracks "
-            "(playlist_id, track_id, title, artist, duration, thumbnail_url, position) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "(playlist_id, track_id, title, artist, artist_id, duration, thumbnail_url, position) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(playlist_id, track_id) DO NOTHING",
-            (playlist_id, track_id, title, artist, duration, thumbnail_url, next_pos),
+            (playlist_id, track_id, title, artist, artist_id, duration, thumbnail_url, next_pos),
         )
         added = cur.rowcount == 1
         await cur.close()
@@ -588,7 +604,7 @@ async def get_shared_playlist(share_token: str) -> Optional[Dict[str, Any]]:
             return None
         tracks = await _fetchall(
             db,
-            "SELECT track_id, title, artist, duration, thumbnail_url, position "
+            "SELECT track_id, title, artist, artist_id, duration, thumbnail_url, position "
             "FROM playlist_tracks WHERE playlist_id = ? ORDER BY position, id",
             (playlist["id"],),
         )

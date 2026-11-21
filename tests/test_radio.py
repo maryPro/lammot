@@ -47,6 +47,36 @@ def test_history_is_optional():
         assert len(get_radio_queue("seed")) == 1
 
 
+def test_song_rows_include_artist_id():
+    tracks = [
+        {
+            "videoId": "t1",
+            "title": "T1",
+            "artists": [{"name": "Artist A", "id": "UCaaaaaaaa1"}],
+            "length": "3:00",
+        },
+    ]
+    with patch("app.radio._get_client", return_value=_client_returning(tracks)):
+        queue = get_radio_queue("seed", history=[], limit=5, kind="song")
+
+    assert queue[0]["artist_id"] == "UCaaaaaaaa1"
+
+
+def test_video_rows_have_no_artist_id():
+    tracks = [
+        {
+            "videoId": "v1",
+            "title": "V1",
+            "artists": [{"name": "Channel", "id": "UCaaaaaaaa1"}],
+            "length": "3:00",
+        },
+    ]
+    with patch("app.radio._get_client", return_value=_client_returning(tracks)):
+        queue = get_radio_queue("seed", history=[], limit=5, kind="video")
+
+    assert queue[0]["artist_id"] is None
+
+
 def test_diversity_filter():
     tracks = [
         {"videoId": "v1", "title": "T1", "artists": [{"name": "Artist A"}]},  # + window [A]

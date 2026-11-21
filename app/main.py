@@ -36,7 +36,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from app import auth, bot, database, radio, resolver, search
+from app import auth, artist, bot, database, radio, resolver, search
 from app.prefetch import SearchPrefetcher
 
 logger = logging.getLogger("lammot.api")
@@ -84,6 +84,7 @@ ENABLE_DOCS = os.getenv("ENABLE_DOCS", "") == "1"
 
 VIDEO_ID_PATTERN = r"^[A-Za-z0-9_-]{11}$"
 _VIDEO_ID_RE = re.compile(VIDEO_ID_PATTERN)
+BROWSE_ID_PATTERN = r"^[A-Za-z0-9_-]{8,64}$"
 SHARE_TOKEN_PATTERN = r"^[A-Za-z0-9_-]{16,64}$"
 _RANGE_RE = re.compile(r"^bytes=\d*-\d*$")
 
@@ -496,6 +497,7 @@ class RateLimiter:
 
 search_limiter = RateLimiter(limit=60)
 stream_limiter = RateLimiter(limit=60)
+artist_limiter = RateLimiter(limit=60)
 
 
 # ---------------------------------------------------------------------------
@@ -536,6 +538,7 @@ class TrackIn(BaseModel):
     video_id: str = Field(..., pattern=VIDEO_ID_PATTERN)
     title: str = Field("", max_length=300)
     artist: str = Field("", max_length=200)
+    artist_id: Optional[str] = Field(None, max_length=64)
     duration_seconds: int = Field(0, ge=0, le=24 * 3600)
     # https only: the value ends up in an <img src> on other users' screens
     thumbnail_url: str = Field("", max_length=1000, pattern=r"^(https://\S+)?$")
@@ -579,6 +582,7 @@ def _track_out(row: Dict[str, Any]) -> Dict[str, Any]:
         "video_id": row["track_id"],
         "title": row.get("title") or "",
         "artist": row.get("artist") or "",
+        "artist_id": row.get("artist_id") or None,
         "duration_seconds": int(row.get("duration") or 0),
         "thumbnail_url": row.get("thumbnail_url") or "",
     }
@@ -691,6 +695,84 @@ async def api_search(
         enqueued,
     )
     return _ok(results)
+
+
+@app.get("/api/artists")
+async def api_artists(
+    q: str = Query(..., min_length=1, max_length=200, description="Artist search query"),
+    limit: int = Query(3, ge=1, le=5),
+    user: auth.TelegramUser = Depends(current_user),
+):
+    search_limiter.check(user.id)
+    q_hash = _query_hash(q)
+    stats: Dict[str, str] = {}
+    started = time.perf_counter()
+    try:
+        results = await run_in_threadpool(artist.search_artists, q, limit, stats=stats)
+    except Exception:
+        logger.exception("Artist search failed for q_hash=%s", q_hash)
+        raise HTTPException(status_code=502, detail="Artist service unavailable")
+    logger.info(
+        "api_artists q_hash=%s limit=%d cache=%s results=%d duration_ms=%.1f",
+        q_hash,
+        limit,
+        stats.get("cache", "miss"),
+        len(results),
+        (time.perf_counter() - started) * 1000,
+    )
+    return _ok(results)
+
+
+@app.get("/api/artists/{browse_id}")
+async def api_artist(
+    browse_id: str = Path(..., pattern=BROWSE_ID_PATTERN),
+    user: auth.TelegramUser = Depends(current_user),
+):
+    artist_limiter.check(user.id)
+    stats: Dict[str, str] = {}
+    started = time.perf_counter()
+    try:
+        data = await run_in_threadpool(artist.get_artist_page, browse_id, stats=stats)
+    except artist.ArtistNotFoundError:
+        raise HTTPException(status_code=404, detail="Artist not found") from None
+    except Exception:
+        logger.exception("Artist page failed for browse_id=%s", browse_id)
+        raise HTTPException(status_code=502, detail="Artist service unavailable")
+    logger.info(
+        "api_artist browse_id=%s cache=%s popular=%d albums=%d singles=%d duration_ms=%.1f",
+        browse_id,
+        stats.get("cache", "miss"),
+        len(data["popular"]),
+        len(data["albums"]),
+        len(data["singles"]),
+        (time.perf_counter() - started) * 1000,
+    )
+    return _ok(data)
+
+
+@app.get("/api/albums/{browse_id}")
+async def api_album(
+    browse_id: str = Path(..., pattern=BROWSE_ID_PATTERN),
+    user: auth.TelegramUser = Depends(current_user),
+):
+    artist_limiter.check(user.id)
+    stats: Dict[str, str] = {}
+    started = time.perf_counter()
+    try:
+        data = await run_in_threadpool(artist.get_album_page, browse_id, stats=stats)
+    except artist.AlbumNotFoundError:
+        raise HTTPException(status_code=404, detail="Album not found") from None
+    except Exception:
+        logger.exception("Album page failed for browse_id=%s", browse_id)
+        raise HTTPException(status_code=502, detail="Album service unavailable")
+    logger.info(
+        "api_album browse_id=%s cache=%s tracks=%d duration_ms=%.1f",
+        browse_id,
+        stats.get("cache", "miss"),
+        len(data["tracks"]),
+        (time.perf_counter() - started) * 1000,
+    )
+    return _ok(data)
 
 
 @app.get("/api/stream/{video_id}")
@@ -932,6 +1014,7 @@ async def api_favorites_add(track: TrackIn, user: auth.TelegramUser = Depends(db
     added = await database.add_favorite(
         user.id, track.video_id, track.title, track.artist,
         track.duration_seconds, track.thumbnail_url or None,
+        artist_id=track.artist_id,
     )
     return _ok({"added": added})
 
@@ -1101,6 +1184,7 @@ async def api_playlist_add_track(
         added = await database.add_track_to_playlist(
             user.id, playlist_id, track.video_id, track.title, track.artist,
             track.duration_seconds, track.thumbnail_url or None,
+            artist_id=track.artist_id,
         )
     except database.PlaylistNotFoundError:
         raise _playlist_not_found() from None

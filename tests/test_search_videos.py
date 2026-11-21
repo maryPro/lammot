@@ -48,6 +48,7 @@ def test_video_result_shape_has_a_kind():
             "video_id": "XEinHUvu1Pc",
             "title": "Roger Sanchez - Lost (Remix) slowed",
             "artist": "KIRMAN",
+            "artist_id": None,
             "duration_seconds": 569,
             "thumbnail_url": "https://i.ytimg.com/vi/x/hq.jpg",
             "kind": "video",

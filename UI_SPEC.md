@@ -127,6 +127,9 @@ Silver, and Matrix Green, white text on dark accents.
 - Editing the query hides any previous results and returns to Recent searches.
 - At least 2 characters are required to submit.
 - Up to 20 results are requested (`limit=20`); the API cap is 25.
+- In **Songs**, up to 3 round **Artists** cards appear above the track results
+  when the query matches an artist. The shelf is horizontally scrollable,
+  hidden when empty, and never shown on **Extended**.
 - Recent searches show up to 10 unique queries, newest first.
 - With no recent searches, the home screen shows an empty-state message
   inviting the user to search.
@@ -153,14 +156,21 @@ Track card:
 
 - Thumbnail: 48×48 px, rounded 8 px; a music note placeholder if the image fails.
 - Title: 14 px bold, one line, truncated.
-- Artist: 12 px secondary color, one line, truncated.
+- Artist: 12 px secondary color, one line, truncated. It is a sibling of the
+  playable row, not nested inside it. When the track has an `artist_id`, the
+  artist name is a tappable link that opens the artist page; otherwise it is
+  plain text.
 - Duration: 12 px secondary color, tabular numerals, right-aligned when known.
-- The row itself starts playback.
+- The main row (thumbnail, title, badge, duration) starts playback.
+- The artist line sits on a second row directly below the title, left-aligned
+  under the cover. The heart button occupies the second column across both
+  rows, and `⋯` occupies the third column across both rows, so a 320 px screen
+  still fits both controls.
 - Extended results show a compact `Video` badge immediately to the left of the
   duration; song rows have no badge.
-- Search and shared-playlist rows show the favorite button: an accent-coloured
-  outlined `♡` (no filled circle) to add, the same heart filled with the accent
-  colour when the track is already saved.
+- Search, favorites, shared-playlist and album rows show the favorite button: an
+  accent-coloured outlined `♡` (no filled circle) to add, the same heart filled
+  with the accent colour when the track is already saved.
 - Tapping a filled heart removes the track from Favorites and returns the
   button to the outlined state.
 - The `⋯` more-actions button opens a sheet:
@@ -169,7 +179,7 @@ Track card:
   - **Add to playlist** — opens the playlist picker, including “New playlist…”.
   - **Remove from Favorites** (filled heart) — shown when the track is saved.
   - **Add to Favorites** (outlined heart) — shown for shared-playlist and
-    playlist rows, but not for search rows (the heart button covers it there).
+    playlist rows, but not for search or album rows (the visible heart covers it).
   - **Remove from this playlist** — only in the playlist screen, marked danger.
 - The currently playing row gets an accent ring around its thumbnail.
 - The results list is labelled `Song results` or `Extended video results`.
@@ -211,6 +221,64 @@ Track card:
   playlists do not share trims: recipients hear their own trim or the full track.
 - **Track duration unavailable** replaces the controls when the duration is not
   known.
+
+### 2.2.2 Artist Page
+
+```
+┌─────────────────────────┐
+│ ←  Zemfira          ▶   │  ← back; Play is disabled with no popular songs
+│        (avatar)         │  ← 132px round artist image
+│        Zemfira          │
+│─────────────────────────│
+│  Popular                │
+│ [thumb] Title       ⋯   │  ← up to 5 tracks
+│         Zemfira         │
+│─────────────────────────│
+│  Albums                 │
+│ [cover] [cover] [cover] │  ← horizontal, up to 10
+│─────────────────────────│
+│  Singles and EPs        │
+│ [cover] [cover]         │  ← horizontal, up to 10
+└─────────────────────────┘
+```
+
+- Opened from a search artist card, an artist name in a track row, or the
+  artist name in the full-screen player.
+- The header title and hero name use the server's artist name; before loading,
+  the header falls back to the name passed by the caller.
+- **Popular** lists up to 5 tracks. Tapping a row plays the list in order; the
+  header **Play** button starts the same list and is disabled when it is empty.
+- **Albums** and **Singles and EPs** are horizontal shelves of square covers.
+  Each card shows the title and a `Type • Year` line. Empty shelves are hidden.
+- Tapping an album card pushes the Album screen.
+- Back returns to the previous screen, including search with the query, tab and
+  results intact.
+- A load failure shows the shared “Could not load this page” state with
+  **Try again**.
+
+### 2.2.3 Album Screen
+
+```
+┌─────────────────────────┐
+│ ←  Album Title          │
+│  [cover] Album Title    │  ← 104px cover + title
+│          Zemfira        │
+│          Album • 2000   │
+│  [▶ Play]               │
+│─────────────────────────│
+│ [thumb] Title     ♡  ⋯  │
+│         Zemfira         │
+└─────────────────────────┘
+```
+
+- The hero shows the album cover, title, artist and `Type • Year` line.
+- **Play** starts list mode from the first track; it stops after the last track
+  and does not refill a radio queue. It is disabled when the album has no
+  playable tracks.
+- Track rows keep the favorite heart and `⋯` menu. The menu does not duplicate
+  **Add to Favorites** because the heart is already visible.
+- Tracks keep the album's original order; unavailable tracks are omitted.
+- Back returns to the artist page that opened the album.
 
 ### 2.3 Favorites Screen
 
@@ -326,6 +394,9 @@ Appears above the bottom bar once a track is loaded. Height: `--mini-h` (64 px).
 - `⋯` beside the track title, to the right of the heart, opens current-track
   actions: **Trim playback** and **Add to playlist**. It does not offer **Play
   next** for the current track or duplicate the favorite action.
+- The artist name under the title is a button. When the current track has an
+  `artist_id`, tapping it closes the player and opens the artist page; without
+  an id it is plain, disabled text with no underline.
 - `♡` beside the track title adds the current track to Favorites; the same
   heart filled with the accent colour removes it and syncs with every other
   visible heart. The heart has no circular background: the accent colour draws
@@ -432,7 +503,9 @@ Appears above the bottom bar once a track is loaded. Height: `--mini-h` (64 px).
    results and returns to Recent searches.
 3. Press Enter (or the mobile keyboard Search action) with at least 2
    characters: the query is recorded, a spinner appears, results are requested,
-   and the server starts prefetch for that final query only.
+   and the server starts prefetch for that final query only. On **Songs**, the
+   Artists shelf is requested in parallel; if only that request fails, the shelf
+   is hidden and the songs still appear.
 4. Results appear only after the response arrives.
 5. Tapping a search result records the search if needed, blurs the field, and
    starts radio mode.
@@ -449,6 +522,10 @@ Appears above the bottom bar once a track is loaded. Height: `--mini-h` (64 px).
 Enter with fewer than 2 characters is a no-op and keeps focus in the field. A
 duplicate Enter for the same query that is already loading or displayed is also
 a no-op (pressing Try again after an error retries).
+
+Opening an artist or album pushes a new view. Back (the Telegram back button,
+the header back arrow, or swipe where supported) pops that view and returns to
+the previous screen; search keeps its query, tab and results.
 
 ### Adding to Favorites
 
