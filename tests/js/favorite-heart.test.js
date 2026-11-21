@@ -7,6 +7,7 @@ const path = require('node:path');
 
 const app = fs.readFileSync(path.join(__dirname, '..', '..', 'frontend', 'app.js'), 'utf8');
 const html = fs.readFileSync(path.join(__dirname, '..', '..', 'frontend', 'index.html'), 'utf8');
+const css = fs.readFileSync(path.join(__dirname, '..', '..', 'frontend', 'style.css'), 'utf8');
 
 test('search rows show a heart instead of a plus', () => {
   assert.match(app, /heart:\s*'<path d="M12 20/, 'app.js must define an outlined heart icon');
@@ -34,4 +35,14 @@ test('the search track menu no longer offers Add to Favorites', () => {
 test('the track menu uses a heart for Remove from Favorites', () => {
   assert.match(app, /label: 'Remove from Favorites', icon: 'heartFilled'/,
     'the remove action must show a heart instead of a star');
+});
+
+test('Remove from Favorites is destructive in every track list', () => {
+  assert.match(app, /label: 'Remove from Favorites', icon: 'heartFilled', danger: true/,
+    'removing a favorite must stay red in search results and Favorites alike');
+});
+
+test('the favorite heart fills more of the circle', () => {
+  assert.match(css, /\.fav-btn \.icon \{\s*width: 20px;\s*height: 20px;/,
+    'the heart inside the favorite button must be larger than the previous 18px');
 });

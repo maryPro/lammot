@@ -406,7 +406,7 @@
     items.push({ label: 'Trim playback', icon: 'scissors', onSelect: () => openTrimSheet(track) });
     items.push({ label: 'Add to playlist', icon: 'listAdd', onSelect: () => chooseTrackPlaylist(track) });
     if (isFavorite(track.video_id)) {
-      items.push({ label: 'Remove from Favorites', icon: 'heartFilled', danger: opts.variant === 'favorites', onSelect: () => removeFavorite(track) });
+      items.push({ label: 'Remove from Favorites', icon: 'heartFilled', danger: true, onSelect: () => removeFavorite(track) });
     } else if (opts.variant !== 'search') {
       items.push({ label: 'Add to Favorites', icon: 'heart', onSelect: () => addFavorite(track) });
     }

@@ -66,7 +66,8 @@ Maintained by: Project Manager / Architect
 
 | Date | Change | Commit / PR |
 |---|---|---|
-| 2026-11-21 | Favorites use heart buttons: outlined `♡` to add, filled `♥` to remove; the Favorites tab and menu use hearts, and search menus drop Add to Favorites | `heart` branch (pending PR) |
+| 2026-11-21 | Favorites use heart buttons: outlined `♡` to add, filled `♥` to remove; the Favorites tab and menu use hearts, and search menus drop Add to Favorites | `4ca18a8` (#44) |
+| 2026-11-21 | Favorites polish: larger heart glyph in the button and a red Remove from Favorites action in search menus | `heart` branch (pending PR) |
 | 2026-11-21 | Clearing the search field resets an active Extended tab back to Songs | `fix-clear-in-search-field` branch (pending PR) |
 | 2026-11-21 | Extended search: Songs/Extended tabs, video search, video radio | `56ad376` (#38) |
 | 2026-11-21 | Playback trimming: per-user start/end metadata, trim sheet with preview, trimmed progress/seek/MediaSession | `edit-track` branch (pending PR) |
