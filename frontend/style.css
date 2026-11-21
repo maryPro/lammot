@@ -349,7 +349,7 @@ body.has-mini .app {
   background: var(--accent);
   color: var(--on-accent);
 }
-.fav-btn .icon { width: 18px; height: 18px; stroke-width: 2.4; }
+.fav-btn .icon { width: 20px; height: 20px; stroke-width: 2.4; }
 .fav-btn.is-fav {
   background: var(--bg-secondary);
   color: var(--accent);
