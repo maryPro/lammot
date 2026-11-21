@@ -56,6 +56,7 @@ Maintained by: Project Manager / Architect
 
 | Date | Decision | Why | Evidence |
 |---|---|---|---|
+| 2026-11-21 | Search rows use the borderless `♡`/`♥` again instead of the filled `＋`/`✓`; artist links are underlined in every track list; and when a track has no duration metadata on the iOS AAC relay, the doubled AVFoundation media estimate is halved | The plus read as a cross and split the favourite control from every other list; artist links looked like plain text in Favorites and playlists; the artist Popular shelf can omit durations, which let the player show 7:07 for a 3:34 track. Halving is gated on the known Apple media stack plus the AAC relay, so other platforms keep the raw media duration | `frontend/app.js`, `frontend/player-time.js`, `frontend/audio-format.js`, `frontend/style.css`, `tests/js/player-time.test.js`, `tests/js/track-row-layout.test.js`, `tests/js/favorite-heart.test.js` |
 | 2026-11-21 | Track rows use one vertically centred flex line (cover, title + artist text block, duration, actions). Search rows show a filled accent `+`/`✓`; other lists keep the borderless heart. The artist page drops the duplicate in-app header and header Play, relying on Telegram's BackButton, and backfills missing popular durations from the artist's top-songs shelf | The two-row grid and duplicate artist header broke alignment and repeated the name; the reference design expects one compact row and standard back navigation. The shelf backfill restores duration labels without failing the page when upstream omits them | `frontend/app.js`, `frontend/style.css`, `app/artist.py`, `tests/js/track-row-layout.test.js`, `tests/test_artist.py` |
 | 2026-11-21 | Tracks gain an optional `artist_id` (YouTube Music browse id); it is persisted only in `favorites` and `playlist_tracks`, with an idempotent `ALTER TABLE` migration. Artist metadata comes only from ytmusicapi; no second provider or new dependency | Make artist names tappable without duplicating search, and keep old databases compatible | `app/artist.py`, `app/search.py`, `app/database.py`, `tests/test_artist.py`, `tests/test_database.py` |
 | 2026-11-21 | Songs search issues `/api/search` and `/api/artists` in parallel with one abort controller; an artist failure hides only the shelf | The artist shelf must never slow down or break song results | `frontend/app.js`, `frontend/artist-view.js` |
@@ -80,6 +81,7 @@ Maintained by: Project Manager / Architect
 
 | Date | Change | Commit / PR |
 |---|---|---|
+| 2026-11-21 | Player duration, artist-link underline, and search hearts (`fix-2-artist` worktree) | (pending PR) |
 | 2026-11-21 | Track row alignment, search `+` button, and artist page header/duration/heart fix (`fix-artist` worktree) | (pending PR) |
 | 2026-11-21 | Artist profile, discography and artist links (`artist` worktree) | (pending PR) |
 | 2026-11-21 | Full-screen player: `⋯` track actions and `♡` favorite toggle | PR #49 |

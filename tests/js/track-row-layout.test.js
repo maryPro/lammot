@@ -49,33 +49,42 @@ test('the title and artist lines are compact', () => {
   assert.match(rule[1], /gap:\s*[0-4]px;/, 'title and artist must sit close together');
 });
 
-test('search rows use the compact pink plus button to add a favourite', () => {
-  assert.match(trackRow, /opts\.variant === 'search'[\s\S]{0,160}favButton\(track, 'add'\)/,
-    'search rows must offer the add-to-favourites plus button');
-  const add = css.match(/\.fav-btn\.fav-add \{([^}]*)\}/);
-  assert.notStrictEqual(add, null, 'the add button needs its own style');
-  assert.match(add[1], /background:\s*var\(--accent\);/,
-    'the add button must be a filled accent circle');
-  assert.match(add[1], /border-radius:\s*var\(--radius-pill\);/);
+test('search rows use the borderless favourite heart like other lists', () => {
+  assert.match(trackRow, /opts\.variant !== 'playlist'[\s\S]{0,120}favButton\(track\)/,
+    'search rows must offer the same heart toggle as Favorites, album and artist rows');
+  assert.doesNotMatch(trackRow, /favButton\(track, 'add'\)/,
+    'search rows must not render the filled plus button');
+  assert.doesNotMatch(css, /\.fav-btn\.fav-add/,
+    'the plus button style must be removed with the add mode');
 });
 
-test('saved search rows switch the plus to a check', () => {
-  assert.match(app, /icon\(fav \? 'check' : 'plus'\)/,
-    'the add button must show a check once the track is saved');
+test('saved search rows show the filled heart', () => {
+  assert.match(app, /icon\(fav \? 'heartFilled' : 'heart'\)/,
+    'the heart must fill once the track is saved');
 });
 
 test('artist page rows keep a favourite heart alongside duration and menu', () => {
-  assert.match(trackRow, /opts\.variant === 'artist'/,
+  assert.match(trackRow, /opts\.variant !== 'playlist'/,
     'artist rows must include the favourite button condition');
   assert.match(trackRow, /favButton\(track\)/, 'artist rows must render the heart');
   const duration = trackRow.indexOf("class: 'track-dur'");
-  const heart = trackRow.indexOf('favButton(track, \'add\')');
-  const toggleHeart = trackRow.indexOf('favButton(track)');
+  const heart = trackRow.indexOf('favButton(track)');
   const more = trackRow.indexOf("class: 'icon-btn more-btn'");
-  assert.ok(duration !== -1 && heart !== -1 && toggleHeart !== -1 && more !== -1,
+  assert.ok(duration !== -1 && heart !== -1 && more !== -1,
     'duration, favourite control and menu must all be present');
-  assert.ok(duration < heart && heart < toggleHeart && toggleHeart < more,
-    'the right side must read duration, favourite control, then menu');
+  assert.ok(duration < heart && heart < more,
+    'the right side must read duration, favourite heart, then menu');
+});
+
+test('track artist links are underlined in every list', () => {
+  const link = css.match(/\.track-artist-link \{([^}]*)\}/);
+  assert.notStrictEqual(link, null, 'the artist link must be styled');
+  assert.match(link[1], /text-decoration:\s*underline;/,
+    'favorites, playlist and other rows must underline the artist link');
+  assert.doesNotMatch(css, /\.track-artist-static[^{]*\{[^}]*text-decoration:\s*underline;/,
+    'static artist text must never gain a link underline');
+  assert.match(app, /class: 'track-artist track-artist-link'/,
+    'the artist link button must stay shared across every track list');
 });
 
 test('the artist page has no duplicate custom header and no header Play button', () => {

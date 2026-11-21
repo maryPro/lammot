@@ -351,6 +351,8 @@ body.has-mini .app {
   max-width: 100%;
   padding: 0;
   text-align: left;
+  text-decoration: underline;
+  text-underline-offset: 2px;
   pointer-events: auto;
 }
 .track-artist-link:active { color: var(--accent); }
@@ -390,15 +392,6 @@ body.has-mini .app {
 }
 .fav-btn .icon { width: 24px; height: 24px; stroke-width: 2.2; }
 .fav-btn:active { transform: scale(0.92); }
-.fav-btn.fav-add {
-  width: 32px;
-  height: 32px;
-  border-radius: var(--radius-pill);
-  background: var(--accent);
-  color: var(--on-accent);
-}
-.fav-btn.fav-add .icon { width: 18px; height: 18px; stroke-width: 2.6; }
-.fav-btn.fav-add.is-fav { background: var(--accent-soft); color: var(--accent); }
 .more-btn { width: 36px; height: 36px; color: var(--text-secondary); }
 
 /* ------------------------------------------------------- artist and album */

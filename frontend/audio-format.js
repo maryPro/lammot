@@ -7,11 +7,17 @@
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.LammotAudioFormat = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
-  function chooseFormat({ canPlayType, userAgent, platform, maxTouchPoints } = {}) {
+  // iPadOS reports a desktop Macintosh user agent; the touch probe tells it
+  // apart from a real Mac.  Both use AVFoundation, which estimates a doubled
+  // duration for the fragmented AAC stream the app relays.
+  function isIOS({ userAgent, platform, maxTouchPoints } = {}) {
     const ua = String(userAgent || '');
-    const isIOS = /iPad|iPhone|iPod/.test(ua)
+    return /iPad|iPhone|iPod/.test(ua)
       || (platform === 'MacIntel' && Number(maxTouchPoints) > 1);
-    if (isIOS) return 'aac';
+  }
+
+  function chooseFormat({ canPlayType, userAgent, platform, maxTouchPoints } = {}) {
+    if (isIOS({ userAgent, platform, maxTouchPoints })) return 'aac';
 
     let support = '';
     try {
@@ -22,5 +28,5 @@
     return support === 'probably' ? 'opus' : 'aac';
   }
 
-  return { chooseFormat };
+  return { chooseFormat, isIOS };
 });
