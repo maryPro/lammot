@@ -477,6 +477,85 @@ async def test_playlist_name_cannot_be_blank(client, headers):
     assert r.status_code == 422
 
 
+# -------------------------------------------------------------------- trims
+async def test_trims_require_auth(client):
+    assert (await client.get("/api/trims")).status_code == 401
+    assert (await client.put(f"/api/trims/{VID}", json={"start_seconds": 1})).status_code == 401
+    assert (await client.delete(f"/api/trims/{VID}")).status_code == 401
+
+
+async def test_trim_put_and_get(client, headers):
+    r = await client.put(
+        f"/api/trims/{VID}", headers=headers, json={"start_seconds": 12.5, "end_seconds": 42}
+    )
+    assert r.status_code == 200
+    assert r.json()["data"] == {"video_id": VID, "start_seconds": 12.5, "end_seconds": 42.0}
+
+    r = await client.get("/api/trims", headers=headers)
+    assert r.status_code == 200
+    assert r.json()["data"] == [
+        {"video_id": VID, "start_seconds": 12.5, "end_seconds": 42.0}
+    ]
+
+
+async def test_trim_put_allows_null_end(client, headers):
+    r = await client.put(
+        f"/api/trims/{VID}", headers=headers, json={"start_seconds": 5, "end_seconds": None}
+    )
+    assert r.status_code == 200
+    assert r.json()["data"]["end_seconds"] is None
+
+
+async def test_trim_put_rejects_invalid_ranges(client, headers):
+    bad = [
+        {"start_seconds": 50, "end_seconds": 20},
+        {"start_seconds": 50, "end_seconds": 50},
+        {"start_seconds": 50, "end_seconds": 50.5},
+        {"start_seconds": -1, "end_seconds": 20},
+    ]
+    for body in bad:
+        r = await client.put(f"/api/trims/{VID}", headers=headers, json=body)
+        assert r.status_code == 422, body
+    assert (await client.get("/api/trims", headers=headers)).json()["data"] == []
+
+
+async def test_trim_put_rejects_invalid_video_id(client, headers):
+    r = await client.put(
+        "/api/trims/not-a-valid-id!!",
+        headers=headers,
+        json={"start_seconds": 0, "end_seconds": 20},
+    )
+    assert r.status_code == 422
+
+
+async def test_trim_delete_reports_removed(client, headers):
+    await client.put(
+        f"/api/trims/{VID}", headers=headers, json={"start_seconds": 1, "end_seconds": 20}
+    )
+    r = await client.delete(f"/api/trims/{VID}", headers=headers)
+    assert r.json()["data"] == {"removed": True}
+    r = await client.delete(f"/api/trims/{VID}", headers=headers)
+    assert r.json()["data"] == {"removed": False}
+
+
+async def test_trims_are_isolated_per_user(client, headers, other_headers):
+    await client.put(
+        f"/api/trims/{VID}", headers=headers, json={"start_seconds": 1, "end_seconds": 20}
+    )
+    assert (await client.get("/api/trims", headers=other_headers)).json()["data"] == []
+
+    await client.put(
+        f"/api/trims/{VID}", headers=other_headers, json={"start_seconds": 2, "end_seconds": 30}
+    )
+    mine = (await client.get("/api/trims", headers=headers)).json()["data"]
+    theirs = (await client.get("/api/trims", headers=other_headers)).json()["data"]
+    assert mine[0]["start_seconds"] == 1
+    assert theirs[0]["start_seconds"] == 2
+
+    await client.delete(f"/api/trims/{VID}", headers=other_headers)
+    assert len((await client.get("/api/trims", headers=headers)).json()["data"]) == 1
+
+
 # --------------------------------------------------------------- delete me
 async def test_delete_me_requires_confirm(client, headers):
     r = await client.delete("/api/me", headers=headers)
@@ -486,10 +565,15 @@ async def test_delete_me_requires_confirm(client, headers):
 async def test_delete_me_removes_only_my_data(client, headers, other_headers):
     for h in (headers, other_headers):
         await client.post("/api/favorites", headers=h, json=TRACK)
+        await client.put(
+            f"/api/trims/{VID}", headers=h, json={"start_seconds": 1, "end_seconds": 20}
+        )
     r = await client.delete("/api/me?confirm=true", headers=headers)
     assert r.status_code == 204
     assert (await client.get("/api/favorites", headers=headers)).json()["data"] == []
+    assert (await client.get("/api/trims", headers=headers)).json()["data"] == []
     assert len((await client.get("/api/favorites", headers=other_headers)).json()["data"]) == 1
+    assert len((await client.get("/api/trims", headers=other_headers)).json()["data"]) == 1
 
 
 # ------------------------------------------------------------------ webhook

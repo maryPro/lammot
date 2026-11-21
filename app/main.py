@@ -551,6 +551,11 @@ class PlaylistIn(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
 
 
+class TrimIn(BaseModel):
+    start_seconds: float = Field(0, ge=0, le=24 * 3600)
+    end_seconds: Optional[float] = Field(None, ge=0, le=24 * 3600)
+
+
 def _ok(data: Any) -> Dict[str, Any]:
     return {"ok": True, "data": data}
 
@@ -937,6 +942,49 @@ async def api_favorites_remove(
     user: auth.TelegramUser = Depends(db_user),
 ):
     removed = await database.remove_favorite(user.id, video_id)
+    return _ok({"removed": removed})
+
+
+# ---------------------------------------------------------------------------
+# Playback trims (per user, per video). Metadata only: audio is never changed.
+# ---------------------------------------------------------------------------
+def _trim_out(row: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "video_id": row["video_id"],
+        "start_seconds": float(row["start_seconds"]),
+        "end_seconds": None if row["end_seconds"] is None else float(row["end_seconds"]),
+    }
+
+
+@app.get("/api/trims")
+async def api_trims(user: auth.TelegramUser = Depends(db_user)):
+    rows = await database.get_trims(user.id)
+    return _ok([_trim_out(r) for r in rows])
+
+
+@app.put("/api/trims/{video_id}")
+async def api_trim_put(
+    video_id: str = Path(..., pattern=VIDEO_ID_PATTERN),
+    body: TrimIn = ...,
+    user: auth.TelegramUser = Depends(db_user),
+):
+    if body.end_seconds is not None:
+        if body.end_seconds <= body.start_seconds:
+            raise HTTPException(status_code=422, detail="end_seconds must be greater than start_seconds")
+        if body.end_seconds - body.start_seconds < 1:
+            raise HTTPException(status_code=422, detail="Select at least 1 second")
+    row = await database.upsert_trim(
+        user.id, video_id, body.start_seconds, body.end_seconds
+    )
+    return _ok(_trim_out(row))
+
+
+@app.delete("/api/trims/{video_id}")
+async def api_trim_delete(
+    video_id: str = Path(..., pattern=VIDEO_ID_PATTERN),
+    user: auth.TelegramUser = Depends(db_user),
+):
+    removed = await database.delete_trim(user.id, video_id)
     return _ok({"removed": removed})
 
 

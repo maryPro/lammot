@@ -51,6 +51,7 @@
     share: '<path d="M12 4v11M7.5 8.5L12 4l4.5 4.5"/><path d="M5 13v5a2 2 0 002 2h10a2 2 0 002-2v-5"/>',
     trash: '<path d="M4 7h16M9 7V4.5h6V7M6.5 7l1 13h9l1-13"/>',
     play: '<path d="M8 5.5v13l11-6.5z" class="solid"/>',
+    scissors: '<circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><path d="M8 8l11 11M8 16L19 5"/>',
     image: '<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><circle cx="9" cy="10" r="1.8"/><path d="M20.5 16l-5-5-8.5 8.5"/>',
   };
 
@@ -276,10 +277,15 @@
   }
 
   // ------------------------------------------------------------ app state
+  const TrimRange = window.LammotTrim;
+  if (!TrimRange) throw new Error('trim-range.js failed to load');
+
   const state = {
     user: null,
     shareBase: null,
     favorites: new Map(),        // video_id → track
+    trims: new Map(),            // video_id → { start_seconds, end_seconds }
+    trimPreview: null,           // active trim sheet preview session
     playlists: null,             // null = not loaded yet
     recent: [],
     search: { q: '', status: 'idle', results: [], error: '' },
@@ -392,6 +398,7 @@
     if (player.current) {
       items.push({ label: 'Play next', icon: 'playNext', onSelect: () => playNext(track) });
     }
+    items.push({ label: 'Trim playback', icon: 'scissors', onSelect: () => openTrimSheet(track) });
     items.push({ label: 'Add to playlist', icon: 'listAdd', onSelect: () => chooseTrackPlaylist(track) });
     if (isFavorite(track.video_id)) {
       items.push({ label: 'Remove from Favorites', icon: 'star', danger: opts.variant === 'favorites', onSelect: () => removeFavorite(track) });
@@ -411,10 +418,16 @@
 
   // ------------------------------------------------------------ sheets
   function closeSheet() {
+    const session = state.trimPreview;
+    state.trimPreview = null;
     const backdrop = $('sheet');
     backdrop.hidden = true;
     backdrop.replaceChildren();
     updateBackButton();
+    if (session) {
+      stopTrimPreview(session);
+      if (session.wasPlaying) audio.play().catch(() => {});
+    }
   }
 
   function showSheet(panel) {
@@ -456,6 +469,199 @@
       backdrop.onclick = (e) => { if (e.target === backdrop) { closeSheet(); resolve(null); } };
       setTimeout(() => input.focus(), 50);
     });
+  }
+
+  // ------------------------------------------------------------ playback trims
+  function trackDuration(track) {
+    if (player.current && player.current.video_id === track.video_id && audio.src && !isSilent()) {
+      return playbackDuration();
+    }
+    const value = Number(track.duration_seconds);
+    return Number.isFinite(value) && value > 0 ? value : 0;
+  }
+
+  function trimmedTrackDuration(track) {
+    const full = Number(track.duration_seconds);
+    if (!(full > 0)) return 0;
+    const trim = TrimRange.normalizeTrim(state.trims.get(track.video_id), full);
+    return trim.valid ? trim.end - trim.start : full;
+  }
+
+  function stopTrimPreview(session) {
+    const preview = (session && session.previewAudio) || $('trim-preview');
+    try { preview.pause(); } catch (_) { /* ignore */ }
+    preview.removeAttribute('src');
+    try { preview.load(); } catch (_) { /* ignore */ }
+  }
+
+  function applyTrimChange(track) {
+    if (!player.current || player.current.video_id !== track.video_id) return;
+    const trim = currentTrim();
+    player.startAt = trim.valid ? trim.start : 0;
+    if (trim.valid && (audio.currentTime < trim.start || audio.currentTime >= trim.end)) {
+      try { audio.currentTime = trim.start; } catch (_) { /* wait for metadata */ }
+    }
+    renderProgress(segmentPosition(), segmentDuration());
+    syncMediaSessionPosition(true);
+  }
+
+  function openTrimSheet(track) {
+    const full = trackDuration(track);
+    const saved = state.trims.get(track.video_id) || null;
+    let start = saved ? Number(saved.start_seconds) : 0;
+    let end = saved && saved.end_seconds != null ? Number(saved.end_seconds) : full;
+    if (!Number.isFinite(start)) start = 0;
+    if (!Number.isFinite(end)) end = full;
+    start = Math.min(Math.max(start, 0), full);
+    end = Math.min(Math.max(end, 0), full);
+
+    const rangeLabel = h('div', { class: 'trim-range-label' });
+    const hint = h('p', { class: 'trim-hint' });
+    const startInput = h('input', {
+      type: 'range', class: 'trim-range', min: '0', max: String(full), step: '0.5',
+      value: String(start), 'aria-label': 'Trim start',
+    });
+    const endInput = h('input', {
+      type: 'range', class: 'trim-range', min: '0', max: String(full), step: '0.5',
+      value: String(end), 'aria-label': 'Trim end',
+    });
+    const previewLabel = h('span', { text: 'Preview' });
+    const previewBtn = h('button', { class: 'btn', type: 'button' }, icon('play'), previewLabel);
+    const saveBtn = h('button', { class: 'btn btn-accent btn-block', type: 'button', text: 'Save' });
+    const resetBtn = saved
+      ? h('button', { class: 'btn btn-block', type: 'button', text: 'Reset trim' })
+      : null;
+    const cancelBtn = h('button', { class: 'btn btn-block', type: 'button', text: 'Cancel' });
+
+    const session = {
+      track,
+      wasPlaying: !audio.paused && !isSilent(),
+      previewAudio: $('trim-preview'),
+      previewStart: start,
+      previewEnd: end,
+    };
+    state.trimPreview = session;
+    if (session.wasPlaying) {
+      try { audio.pause(); } catch (_) { /* ignore */ }
+    }
+
+    let previewLoading = false;
+
+    const readInputs = () => {
+      start = Number(startInput.value);
+      end = Number(endInput.value);
+    };
+    const sync = () => {
+      readInputs();
+      rangeLabel.textContent = `${fmtTime(start)} – ${fmtTime(end)}`;
+      const error = TrimRange.validateTrim(start, end, full);
+      saveBtn.disabled = Boolean(error);
+      previewBtn.disabled = Boolean(error) || previewLoading;
+      hint.textContent = error || '';
+    };
+
+    startInput.addEventListener('input', sync);
+    endInput.addEventListener('input', sync);
+    cancelBtn.addEventListener('click', () => closeSheet());
+
+    previewBtn.addEventListener('click', async () => {
+      readInputs();
+      const error = TrimRange.validateTrim(start, end, full);
+      if (error) { hint.textContent = error; return; }
+      stopTrimPreview(session);
+      previewLoading = true;
+      previewBtn.disabled = true;
+      previewLabel.textContent = 'Loading preview…';
+      try {
+        const url = await streamLink(track, preferredFormat);
+        if (state.trimPreview !== session) return;
+        session.previewStart = start;
+        session.previewEnd = end;
+        const preview = session.previewAudio;
+        preview.src = url;
+        const play = () => {
+          if (state.trimPreview !== session) return;
+          try { preview.currentTime = start; } catch (_) { /* ignore */ }
+          preview.play().catch(() => toast('Preview could not start'));
+        };
+        if (preview.readyState >= 1) play();
+        else preview.addEventListener('loadedmetadata', play, { once: true });
+      } catch (err) {
+        if (state.trimPreview === session) toast(err.message);
+      } finally {
+        previewLoading = false;
+        previewLabel.textContent = 'Preview';
+        if (state.trimPreview === session) sync();
+      }
+    });
+
+    saveBtn.addEventListener('click', async () => {
+      readInputs();
+      const error = TrimRange.validateTrim(start, end, full);
+      if (error) { hint.textContent = error; return; }
+      stopTrimPreview(session);
+      saveBtn.disabled = true;
+      try {
+        const row = await api(`/api/trims/${encodeURIComponent(track.video_id)}`, {
+          method: 'PUT',
+          body: {
+            start_seconds: Math.round(start * 10) / 10,
+            end_seconds: Math.round(end * 10) / 10,
+          },
+        });
+        state.trims.set(track.video_id, row);
+        applyTrimChange(track);
+        haptic('success');
+        toast('Trim saved');
+        closeSheet();
+      } catch (err) {
+        saveBtn.disabled = false;
+        toast(err.message);
+      }
+    });
+
+    if (resetBtn) {
+      resetBtn.addEventListener('click', async () => {
+        stopTrimPreview(session);
+        resetBtn.disabled = true;
+        try {
+          await api(`/api/trims/${encodeURIComponent(track.video_id)}`, { method: 'DELETE' });
+          state.trims.delete(track.video_id);
+          applyTrimChange(track);
+          toast('Trim removed');
+          closeSheet();
+        } catch (err) {
+          resetBtn.disabled = false;
+          toast(err.message);
+        }
+      });
+    }
+
+    if (!(full > 0)) {
+      rangeLabel.textContent = '0:00 – 0:00';
+      startInput.disabled = true;
+      endInput.disabled = true;
+      previewBtn.disabled = true;
+      saveBtn.disabled = true;
+      hint.textContent = 'Track duration unavailable';
+    } else {
+      sync();
+    }
+
+    const panel = h('div', { class: 'sheet trim-sheet', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Trim playback' },
+      h('div', { class: 'sheet-title', text: 'Trim playback' }),
+      h('div', { class: 'sheet-sub', text: `${track.title || 'Untitled'}${track.artist ? ' · ' + track.artist : ''}` }),
+      rangeLabel,
+      h('label', { class: 'trim-range-row' },
+        h('span', { class: 'trim-range-name', text: 'Start' }), startInput),
+      h('label', { class: 'trim-range-row' },
+        h('span', { class: 'trim-range-name', text: 'End' }), endInput),
+      hint,
+      h('div', { class: 'trim-actions' }, previewBtn),
+      saveBtn,
+      resetBtn,
+      cancelBtn);
+    showSheet(panel);
   }
 
   // ------------------------------------------------------------ playlists
@@ -1073,6 +1279,7 @@
     try {
       await api('/api/me?confirm=true', { method: 'DELETE' });
       state.favorites.clear();
+      state.trims.clear();
       state.playlists = [];
       state.recent = [];
       renderHome();
@@ -1142,6 +1349,7 @@
     playing: false,
     seeking: false,
     forcedEnd: false,
+    startAt: 0,
   };
 
   // Track metadata is the source of truth: some iOS webviews report a
@@ -1149,6 +1357,38 @@
   // track has no duration or playback runs past it.
   function playbackDuration() {
     return pickDuration(audio.duration, player.current && player.current.duration_seconds, audio.currentTime);
+  }
+
+  // The trim sheet and progress UI use the selected segment as the visible
+  // range: 0:00 is the trim start and the total is the trimmed length.
+  function currentTrim() {
+    const raw = player.current ? state.trims.get(player.current.video_id) : null;
+    return TrimRange.normalizeTrim(raw, playbackDuration());
+  }
+
+  function segmentDuration() {
+    const full = playbackDuration();
+    const trim = currentTrim();
+    return trim.valid ? trim.end - trim.start : full;
+  }
+
+  function segmentPosition() {
+    const trim = currentTrim();
+    return trim.valid ? Math.max(0, audio.currentTime - trim.start) : audio.currentTime;
+  }
+
+  function applyStartSeek() {
+    const start = player.startAt || 0;
+    const seq = player.loadSeq;
+    if (!start || !player.current) return;
+    const seek = () => {
+      if (seq !== player.loadSeq) return;
+      try {
+        if (player.current && audio.currentTime < start) audio.currentTime = start;
+      } catch (_) { /* iOS rejects seeks before metadata */ }
+    };
+    if (audio.readyState >= 1) seek();
+    else audio.addEventListener('loadedmetadata', seek, { once: true });
   }
 
   async function streamLink(track, format, { prefetch = false } = {}) {
@@ -1233,6 +1473,10 @@
     player.format = preferredFormat;
     player.triedFallback = false;
     player.prefetchedFor = null;
+    const startTrim = TrimRange.normalizeTrim(
+      state.trims.get(track.video_id), Number(track.duration_seconds) || 0
+    );
+    player.startAt = startTrim.valid ? startTrim.start : 0;
     renderPlayer();
     markCurrentRows();
     updateMediaSession();
@@ -1242,6 +1486,7 @@
       const url = await streamLink(track, player.format);
       if (seq !== player.loadSeq) return;
       audio.src = url;
+      applyStartSeek();
       await audio.play();
       if (seq === player.loadSeq) player.playing = true;
       player.failedInRow = 0;
@@ -1304,7 +1549,12 @@
         const url = await streamLink(player.current, 'aac');
         if (seq !== player.loadSeq) return true;
         audio.src = url;
-        if (at) audio.currentTime = at;
+        const trim = currentTrim();
+        let resumeAt = Math.max(at || 0, player.startAt || 0);
+        if (trim.valid) resumeAt = Math.min(Math.max(resumeAt, trim.start), trim.end);
+        if (resumeAt) {
+          try { audio.currentTime = resumeAt; } catch (_) { /* wait for metadata */ }
+        }
         await audio.play();
         if (seq === player.loadSeq) player.playing = true;
         // Only a stream that actually plays may change the session format
@@ -1416,7 +1666,8 @@
   function prev() {
     if (!player.current) return;
     if (audio.currentTime > 3 || !player.history.length) {
-      audio.currentTime = 0;
+      const trim = currentTrim();
+      audio.currentTime = trim.valid ? trim.start : 0;
       return;
     }
     const previous = player.history.pop();
@@ -1467,8 +1718,8 @@
     $('fp-artist').textContent = t.artist || '';
     $('fp-art').setAttribute('referrerpolicy', 'no-referrer');
     setImage($('fp-art'), t.thumbnail_url);
-    $('fp-total').textContent = fmtTime(t.duration_seconds);
-    renderProgress(0, t.duration_seconds || 0);
+    $('fp-total').textContent = fmtTime(trimmedTrackDuration(t));
+    renderProgress(0, trimmedTrackDuration(t));
     renderPlayState();
     renderQueue();
   }
@@ -1558,7 +1809,7 @@
 
   function syncMediaSessionPosition(force) {
     if (!player.current || isSilent()) return;
-    applyPositionState(playbackDuration(), audio.currentTime, force);
+    applyPositionState(segmentDuration(), segmentPosition(), force);
   }
 
   function updateMediaSession() {
@@ -1572,7 +1823,7 @@
     } catch (_) { /* unsupported */ }
     // A new track starts at zero; reset the system timeline immediately
     // instead of waiting for the first timeupdate.
-    applyPositionState(t.duration_seconds, 0, true);
+    applyPositionState(trimmedTrackDuration(t), 0, true);
   }
 
   function bindMediaSession() {
@@ -1582,7 +1833,14 @@
       pause: () => audio.pause(),
       nexttrack: () => next(),
       previoustrack: () => prev(),
-      seekto: (d) => { if (d && Number.isFinite(d.seekTime)) audio.currentTime = d.seekTime; },
+      seekto: (d) => {
+        if (!d || !Number.isFinite(d.seekTime)) return;
+        const full = playbackDuration();
+        const raw = player.current ? state.trims.get(player.current.video_id) : null;
+        const trim = currentTrim();
+        const target = trim.valid ? trim.start + d.seekTime : d.seekTime;
+        audio.currentTime = TrimRange.clampToTrim(target, raw, full);
+      },
     };
     for (const [action, fn] of Object.entries(handlers)) {
       try { navigator.mediaSession.setActionHandler(action, fn); } catch (_) { /* unsupported action */ }
@@ -1697,14 +1955,18 @@
     const seek = $('fp-seek');
     seek.addEventListener('input', () => {
       player.seeking = true;
-      const duration = playbackDuration();
+      const duration = segmentDuration();
       const ratio = Number(seek.value) / 1000;
       seek.style.setProperty('--fill', `${ratio * 100}%`);
       $('fp-elapsed').textContent = fmtTime(ratio * duration);
     });
     seek.addEventListener('change', () => {
-      const duration = playbackDuration();
-      if (duration > 0) audio.currentTime = (Number(seek.value) / 1000) * duration;
+      const ratio = Number(seek.value) / 1000;
+      const full = playbackDuration();
+      if (full > 0) {
+        const raw = player.current ? state.trims.get(player.current.video_id) : null;
+        audio.currentTime = TrimRange.seekTime(ratio, raw, full);
+      }
       player.seeking = false;
     });
 
@@ -1731,6 +1993,19 @@
     });
     audio.addEventListener('timeupdate', () => {
       if (isSilent()) return;
+      const full = playbackDuration();
+      const rawTrim = player.current ? state.trims.get(player.current.video_id) : null;
+      const trim = currentTrim();
+      if (!player.loading && rawTrim && trim.valid && audio.currentTime >= trim.end - 0.25) {
+        // The selected segment ends here; iOS may still tick through the
+        // source tail, so use the same single-shot guard as the doubled-
+        // duration path.
+        if (!player.forcedEnd) {
+          player.forcedEnd = true;
+          next({ auto: true });
+        }
+        return;
+      }
       const track = player.current && player.current.duration_seconds;
       if (!player.loading && shouldForceTrackEnd(audio.duration, track, audio.currentTime)) {
         // iOS reports a doubled duration and keeps ticking through silence
@@ -1741,12 +2016,13 @@
         }
         return;
       }
-      const duration = playbackDuration();
-      renderProgress(audio.currentTime, duration);
+      renderProgress(segmentPosition(), segmentDuration());
       syncMediaSessionPosition(false);
       // Lazy resolve: get the next song's link ~15 s before this one ends
       const upcoming = player.queue[0];
-      if (upcoming && !player.botCheck && duration > 0 && duration - audio.currentTime < PREFETCH_SECONDS
+      const remaining = trim.valid ? trim.end - audio.currentTime : full - audio.currentTime;
+      if (upcoming && !player.botCheck && (trim.valid || full > 0)
+          && remaining < PREFETCH_SECONDS
           && player.prefetchedFor !== upcoming.video_id) {
         player.prefetchedFor = upcoming.video_id;
         streamLink(upcoming, preferredFormat, { prefetch: true }).catch(() => {});
@@ -1755,10 +2031,11 @@
     for (const evt of ['loadedmetadata', 'durationchange']) {
       audio.addEventListener(evt, () => {
         if (isSilent()) return;
-        renderProgress(audio.currentTime, playbackDuration());
+        renderProgress(segmentPosition(), segmentDuration());
         syncMediaSessionPosition(true);
       });
     }
+    audio.addEventListener('loadedmetadata', applyStartSeek);
     audio.addEventListener('seeked', () => syncMediaSessionPosition(true));
     audio.addEventListener('ended', () => {
       if (isSilent()) return;
@@ -1766,6 +2043,20 @@
       next({ auto: true });
     });
     audio.addEventListener('error', onMediaError);
+
+    const preview = $('trim-preview');
+    preview.addEventListener('timeupdate', () => {
+      const session = state.trimPreview;
+      if (!session || session.previewEnd == null) return;
+      if (preview.currentTime >= session.previewEnd - 0.2) {
+        try { preview.pause(); } catch (_) { /* ignore */ }
+      }
+    });
+    preview.addEventListener('error', () => {
+      if (state.trimPreview && preview.getAttribute('src')) {
+        toast('Preview is unavailable for this track.');
+      }
+    });
 
     doc.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') handleBack();
@@ -1811,10 +2102,11 @@
     renderHome();
     renderPlayer();
 
-    const [me, favs, history] = await Promise.allSettled([
+    const [me, favs, history, trims] = await Promise.allSettled([
       api('/api/me'),
       api('/api/favorites'),
       api('/api/history'),
+      api('/api/trims'),
     ]);
     if (me.status === 'fulfilled' && me.value) {
       state.user = me.value.user;
@@ -1828,6 +2120,9 @@
     if (history.status === 'fulfilled' && history.value) {
       state.recent = history.value.searches || [];
       if (state.search.status === 'idle') renderHome();
+    }
+    if (trims.status === 'fulfilled' && trims.value) {
+      state.trims = new Map(trims.value.map((t) => [t.video_id, t]));
     }
 
     const token = startParamPlaylist();

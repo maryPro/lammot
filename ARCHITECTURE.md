@@ -89,6 +89,7 @@ lammot/
 │   ├── audio-format.js  # Pure Opus/AAC choice, loaded before app.js
 │   ├── search-query.js  # Pure submit rules (explicit-submit search)
 │   ├── search-tabs.js   # Pure Songs/Extended tab rules
+│   ├── trim-range.js    # Pure trim math: clamping, progress, seek, end detection
 │   └── player-time.js   # Pure duration/progress helpers (iOS normalization)
 ├── tests/
 │   ├── conftest.py
@@ -104,6 +105,7 @@ lammot/
 │   ├── test_search_tabs.py      # Runs tests/js/search-tabs.test.js through Node
 │   ├── test_search_prefetch.py
 │   ├── test_audio_format.py     # Runs audio-format.test.js through Node
+│   ├── test_trim_range.py       # Runs tests/js/trim-range.test.js through Node
 │   ├── audio-format.test.js
 │   └── js/player-time.test.js
 ├── docs/
@@ -289,6 +291,9 @@ Tracks always have one shape:
 | `GET` | `/api/favorites` | ✓ | User's favorites, newest first |
 | `POST` | `/api/favorites` | ✓ | Add track `{video_id, title, artist, duration_seconds, thumbnail_url}` |
 | `DELETE` | `/api/favorites/{video_id}` | ✓ | Remove from favorites |
+| `GET` | `/api/trims` | ✓ | All playback trims of the user: `[{video_id, start_seconds, end_seconds}]` |
+| `PUT` | `/api/trims/{video_id}` | ✓ | Save `{start_seconds, end_seconds}` (null end = full track); rejects inverted or sub-1-second ranges |
+| `DELETE` | `/api/trims/{video_id}` | ✓ | Remove a trim; returns `{removed}` |
 | `GET` | `/api/history` | ✓ | `data` = `{searches: [string], played: [track]}`: last 10 distinct searches and last 20 plays |
 | `POST` | `/api/history` | ✓ | `{kind: "search", query}` or `{kind: "play", track}` |
 | `DELETE` | `/api/history?type=search\|play\|all` | ✓ | Clear history (204) |
@@ -416,6 +421,16 @@ CREATE TABLE play_history (
 );
 CREATE INDEX idx_play_history_user ON play_history(telegram_user_id, id);
 
+CREATE TABLE track_trims (
+    telegram_user_id INTEGER NOT NULL
+        REFERENCES users(telegram_user_id) ON DELETE CASCADE,
+    video_id TEXT NOT NULL,
+    start_seconds REAL NOT NULL DEFAULT 0 CHECK (start_seconds >= 0),
+    end_seconds REAL CHECK (end_seconds IS NULL OR end_seconds > start_seconds),
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (telegram_user_id, video_id)
+);
+
 -- Legacy/unused shared-cache tables. The running app uses app/cache.py.
 CREATE TABLE stream_cache (
     video_id TEXT PRIMARY KEY,
@@ -440,9 +455,12 @@ Notes:
   deleted.
 - `playlist_tracks.position` defines order; adding a track appends
   `MAX(position) + 1`.
-- `delete_user_data()` removes favorites, playlists with their tracks, and both
-  histories in one transaction. It does not touch the shared cache tables,
-  which contain no personal data.
+- `track_trims` stores playback-only ranges: one row per user and video; a
+  `NULL` `end_seconds` means “until the end of the track”. It never changes or
+  stores media, and shared playlists do not share trims.
+- `delete_user_data()` removes favorites, playlists with their tracks, both
+  histories, and playback trims in one transaction. It does not touch the
+  shared cache tables, which contain no personal data.
 
 ---
 

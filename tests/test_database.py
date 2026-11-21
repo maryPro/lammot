@@ -146,6 +146,48 @@ async def test_shared_playlist_is_read_only_view(temp_db):
     assert await temp_db.get_shared_playlist("unknown-token-1234567") is None
 
 
+# ------------------------------------------------------------------- trims
+async def test_trim_table_exists(temp_db):
+    async with temp_db._connect() as db:
+        row = await temp_db._fetchone(
+            db,
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'track_trims'",
+            (),
+        )
+    assert row is not None
+
+
+async def test_trim_upsert_creates_and_replaces(temp_db):
+    await _user(temp_db, A)
+    row = await temp_db.upsert_trim(A, "aaaaaaaaaaa", 12.5, 42.0)
+    assert (row["video_id"], row["start_seconds"], row["end_seconds"]) == ("aaaaaaaaaaa", 12.5, 42.0)
+
+    row = await temp_db.upsert_trim(A, "aaaaaaaaaaa", 5.0, None)
+    assert (row["start_seconds"], row["end_seconds"]) == (5.0, None)
+
+    trims = await temp_db.get_trims(A)
+    assert len(trims) == 1
+    assert trims[0]["start_seconds"] == 5.0 and trims[0]["end_seconds"] is None
+
+
+async def test_get_trims_isolated_per_user(temp_db):
+    await _user(temp_db, A)
+    await _user(temp_db, B)
+    await temp_db.upsert_trim(A, "aaaaaaaaaaa", 1.0, 20.0)
+    await temp_db.upsert_trim(B, "bbbbbbbbbbb", 2.0, 30.0)
+
+    assert [t["video_id"] for t in await temp_db.get_trims(A)] == ["aaaaaaaaaaa"]
+    assert [t["video_id"] for t in await temp_db.get_trims(B)] == ["bbbbbbbbbbb"]
+
+
+async def test_delete_trim_removes_one_row(temp_db):
+    await _user(temp_db, A)
+    await temp_db.upsert_trim(A, "aaaaaaaaaaa", 1.0, 20.0)
+    assert await temp_db.delete_trim(A, "aaaaaaaaaaa") is True
+    assert await temp_db.delete_trim(A, "aaaaaaaaaaa") is False
+    assert await temp_db.get_trims(A) == []
+
+
 # ---------------------------------------------------------------- deletion
 async def test_delete_user_data_only_affects_that_user(temp_db):
     await _user(temp_db, A)
@@ -154,6 +196,7 @@ async def test_delete_user_data_only_affects_that_user(temp_db):
         await _fav(temp_db, uid, "aaaaaaaaaaa")
         await temp_db.add_search_query(uid, "q")
         await temp_db.add_played_track(uid, "aaaaaaaaaaa", "T", "Ar", None)
+        await temp_db.upsert_trim(uid, "aaaaaaaaaaa", 1.0, 20.0)
     pl_a = await temp_db.create_playlist(A, "A list")
     await temp_db.add_track_to_playlist(A, pl_a["id"], "aaaaaaaaaaa", "T", "Ar", 1, None)
     pl_b = await temp_db.create_playlist(B, "B list")
@@ -164,10 +207,12 @@ async def test_delete_user_data_only_affects_that_user(temp_db):
     assert await temp_db.get_search_history(A) == []
     assert await temp_db.get_play_history(A) == []
     assert await temp_db.get_playlists(A) == []
+    assert await temp_db.get_trims(A) == []
     assert await temp_db.get_shared_playlist(pl_a["share_token"]) is None
 
     assert len(await temp_db.get_favorites(B)) == 1
     assert len(await temp_db.get_search_history(B)) == 1
+    assert len(await temp_db.get_trims(B)) == 1
     assert await temp_db.get_shared_playlist(pl_b["share_token"]) is not None
 
     assert await temp_db.delete_user_data(A) is False  # already gone
