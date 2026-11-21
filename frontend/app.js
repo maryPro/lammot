@@ -847,6 +847,7 @@
 
   function clearSearch() {
     searchInput.value = '';
+    state.searchType = SearchTabs.normalizeTab('songs');
     onSearchInput();
     searchInput.focus();
   }

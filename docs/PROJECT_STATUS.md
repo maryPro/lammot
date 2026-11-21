@@ -66,6 +66,7 @@ Maintained by: Project Manager / Architect
 
 | Date | Change | Commit / PR |
 |---|---|---|
+| 2026-11-21 | Clearing the search field resets an active Extended tab back to Songs | `fix-clear-in-search-field` branch (pending PR) |
 | 2026-11-21 | Extended search: Songs/Extended tabs, video search, video radio | `56ad376` (#38) |
 | 2026-11-21 | Playback trimming: per-user start/end metadata, trim sheet with preview, trimmed progress/seek/MediaSession | `edit-track` branch (pending PR) |
 | 2026-11-21 | Extended tabs centered and Video badge placed before duration | `783b41d` (#39) |
