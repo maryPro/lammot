@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -42,6 +43,22 @@ def test_video_badge_sits_left_of_the_duration():
     badge = source.index("class: 'track-badge'")
     duration = source.index("class: 'track-dur'")
     assert badge < duration
+
+
+def test_clearing_search_resets_the_tab_to_songs():
+    source = (ROOT / "frontend" / "app.js").read_text(encoding="utf-8")
+    match = re.search(r"function clearSearch\(\) \{\n(.*?)\n  \}", source, re.S)
+    assert match, "clearSearch() not found in app.js"
+    body = match.group(1)
+    reset = "SearchTabs.normalizeTab('songs')"
+    assert reset in body, (
+        "Clearing the search field must reset state.searchType to songs; "
+        "otherwise Extended stays selected although Songs is the default."
+    )
+    assert body.index(reset) < body.index("onSearchInput()"), (
+        "The tab must be reset before re-rendering; otherwise the clear button "
+        "leaves Extended visually selected."
+    )
 
 
 def test_search_tabs_are_centred():
