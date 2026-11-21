@@ -112,7 +112,7 @@ Silver, and Matrix Green, white text on dark accents.
 │                         │
 │  [mini-player]          │  ← once a track is loaded
 │─────────────────────────│
-│  ⚙️         ⭐       👤 │  ← Settings | Favorites | Profile
+│  ⚙️         ❤️       👤 │  ← Settings | Favorites | Profile
 └─────────────────────────┘
 ```
 
@@ -140,11 +140,11 @@ Silver, and Matrix Green, white text on dark accents.
 ┌─────────────────────────┐
 │  🔍 Zemfira          ×  │
 │─────────────────────────│
-│ [thumb] Title       [+] │  ← favorite button
+│ [thumb] Title       [♡] │  ← favorite button
 │         Artist      ⋯   │  ← more actions
 │         3:45            │
 │─────────────────────────│
-│ [thumb] Title       [✓] │  ← already in Favorites
+│ [thumb] Title       [♥] │  ← already in Favorites
 │         Artist      ⋯   │
 └─────────────────────────┘
 ```
@@ -158,13 +158,17 @@ Track card:
 - The row itself starts playback.
 - Extended results show a compact `Video` badge immediately to the left of the
   duration; song rows have no badge.
-- Search and shared-playlist rows show the favorite button: `+` to add, `✓`
-  (checked, greyed) when already saved.
+- Search and shared-playlist rows show the favorite button: an outlined `♡`
+  to add, a filled `♥` (accent colour) when already saved.
+- Tapping a filled heart removes the track from Favorites and returns the
+  button to the outlined state.
 - The `⋯` more-actions button opens a sheet:
   - **Play next** — only when a track is already loaded.
   - **Trim playback** — opens the trim sheet for this track.
   - **Add to playlist** — opens the playlist picker, including “New playlist…”.
-  - **Add to Favorites** or **Remove from Favorites** — reflects current state.
+  - **Remove from Favorites** (filled heart) — shown when the track is saved.
+  - **Add to Favorites** (outlined heart) — shown for shared-playlist and
+    playlist rows, but not for search rows (the heart button covers it there).
   - **Remove from this playlist** — only in the playlist screen, marked danger.
 - The currently playing row gets an accent ring around its thumbnail.
 - The results list is labelled `Song results` or `Extended video results`.
@@ -228,7 +232,7 @@ Track card:
   menu.
 - Playback uses list mode: next track in the filtered list, no radio, and it
   stops after the last track.
-- Empty state: “No favorites yet — Tap + next to a song in search to save it
+- Empty state: “No favorites yet — Tap ♡ next to a song in search to save it
   here.”
 - A filter with no matches shows “No songs match your search.”
 
@@ -436,10 +440,11 @@ a no-op (pressing Try again after an error retries).
 
 ### Adding to Favorites
 
-- Tap `+` on a search or shared-playlist row.
+- Tap the outlined `♡` on a search or shared-playlist row.
 - The UI updates optimistically with light haptic feedback (`impactOccurred('light')`).
 - On API failure the change is rolled back and a toast shows the error.
-- Removing a favorite from the `⋯` menu uses the same optimistic pattern.
+- Tap the filled `♥` to remove the track from Favorites; the same optimistic
+  pattern applies. Removing from the `⋯` menu works the same way.
 
 ### Confirmations and feedback
 

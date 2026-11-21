@@ -46,6 +46,8 @@
     clock: '<circle cx="12" cy="12" r="8"/><path d="M12 8v4.5l3 1.5"/>',
     music: '<path d="M9 18V5.5l11-2V16"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="17.5" cy="16" r="2.5"/>',
     star: '<path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.9l-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z"/>',
+    heart: '<path d="M12 20S4 15.3 4 9.8C4 7.1 6.1 5 8.7 5c1.3 0 2.5.6 3.3 1.6C12.8 5.6 14 5 15.3 5 17.9 5 20 7.1 20 9.8 20 15.3 12 20 12 20z"/>',
+    heartFilled: '<path d="M12 20S4 15.3 4 9.8C4 7.1 6.1 5 8.7 5c1.3 0 2.5.6 3.3 1.6C12.8 5.6 14 5 15.3 5 17.9 5 20 7.1 20 9.8 20 15.3 12 20 12 20z" class="solid"/>',
     listAdd: '<path d="M4 6h12M4 12h12M4 18h7M18 14v7M14.5 17.5h7"/>',
     playNext: '<path d="M4 6h10M4 12h10M4 18h6"/><path d="M15 15.5v6l5-3z" class="solid"/>',
     share: '<path d="M12 4v11M7.5 8.5L12 4l4.5 4.5"/><path d="M5 13v5a2 2 0 002 2h10a2 2 0 002-2v-5"/>',
@@ -302,12 +304,12 @@
     if (isFavorite(track.video_id)) return;
     state.favorites.set(track.video_id, track);
     haptic('light');
-    refreshFavoriteButtons(track.video_id);
+    refreshFavoriteButtons(track.video_id, track);
     try {
       await api('/api/favorites', { method: 'POST', body: trackBody(track) });
     } catch (err) {
       state.favorites.delete(track.video_id);
-      refreshFavoriteButtons(track.video_id);
+      refreshFavoriteButtons(track.video_id, track);
       toast(err.message);
     }
     if (button) button.blur();
@@ -317,14 +319,15 @@
     if (!isFavorite(track.video_id)) return;
     const saved = state.favorites.get(track.video_id);
     state.favorites.delete(track.video_id);
-    refreshFavoriteButtons(track.video_id);
+    haptic('light');
+    refreshFavoriteButtons(track.video_id, track);
     rerenderViewIf('favorites');
     try {
       await api(`/api/favorites/${encodeURIComponent(track.video_id)}`, { method: 'DELETE' });
       toast('Removed from Favorites');
     } catch (err) {
       state.favorites.set(track.video_id, saved);
-      refreshFavoriteButtons(track.video_id);
+      refreshFavoriteButtons(track.video_id, track);
       rerenderViewIf('favorites');
       toast(err.message);
     }
@@ -335,7 +338,8 @@
     setFavButton(btn, track);
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
-      if (!isFavorite(track.video_id)) addFavorite(track, btn);
+      if (isFavorite(track.video_id)) removeFavorite(track);
+      else addFavorite(track, btn);
     });
     return btn;
   }
@@ -343,15 +347,15 @@
   function setFavButton(btn, track) {
     const fav = isFavorite(track.video_id);
     btn.classList.toggle('is-fav', fav);
-    btn.replaceChildren(icon(fav ? 'check' : 'plus'));
-    btn.setAttribute('aria-label', fav ? 'In Favorites' : `Add ${track.title} to Favorites`);
-    btn.setAttribute('aria-disabled', fav ? 'true' : 'false');
+    btn.replaceChildren(icon(fav ? 'heartFilled' : 'heart'));
+    btn.setAttribute('aria-label', fav ? `Remove ${track.title} from Favorites` : `Add ${track.title} to Favorites`);
+    btn.setAttribute('aria-pressed', fav ? 'true' : 'false');
   }
 
-  function refreshFavoriteButtons(videoId) {
+  function refreshFavoriteButtons(videoId, fallbackTrack) {
     doc.querySelectorAll('[data-fav]').forEach((btn) => {
       if (btn.dataset.fav !== videoId) return;
-      const track = state.favorites.get(videoId) || { video_id: videoId, title: '' };
+      const track = state.favorites.get(videoId) || fallbackTrack || { video_id: videoId, title: '' };
       setFavButton(btn, track);
     });
   }
@@ -402,9 +406,9 @@
     items.push({ label: 'Trim playback', icon: 'scissors', onSelect: () => openTrimSheet(track) });
     items.push({ label: 'Add to playlist', icon: 'listAdd', onSelect: () => chooseTrackPlaylist(track) });
     if (isFavorite(track.video_id)) {
-      items.push({ label: 'Remove from Favorites', icon: 'star', danger: opts.variant === 'favorites', onSelect: () => removeFavorite(track) });
-    } else {
-      items.push({ label: 'Add to Favorites', icon: 'star', onSelect: () => addFavorite(track) });
+      items.push({ label: 'Remove from Favorites', icon: 'heartFilled', danger: opts.variant === 'favorites', onSelect: () => removeFavorite(track) });
+    } else if (opts.variant !== 'search') {
+      items.push({ label: 'Add to Favorites', icon: 'heart', onSelect: () => addFavorite(track) });
     }
     if (opts.variant === 'playlist' && opts.playlistId) {
       items.push({
