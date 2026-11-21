@@ -352,10 +352,9 @@ body.has-mini .app {
 .fav-btn .icon { width: 18px; height: 18px; stroke-width: 2.4; }
 .fav-btn.is-fav {
   background: var(--bg-secondary);
-  color: var(--text-secondary);
-  cursor: default;
+  color: var(--accent);
 }
-.fav-btn:not(.is-fav):active { transform: scale(0.92); }
+.fav-btn:active { transform: scale(0.92); }
 .more-btn { width: 36px; height: 36px; color: var(--text-secondary); }
 
 /* --------------------------------------------------------------- buttons */
