@@ -619,7 +619,7 @@ body.has-mini .app {
 .fp-meta-actions {
   display: flex;
   align-items: center;
-  gap: var(--spacing-md);
+  gap: var(--spacing-sm);
   flex: none;
 }
 .fp-title {
