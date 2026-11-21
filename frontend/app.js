@@ -1660,7 +1660,10 @@
   async function refillRadio(force) {
     if (player.mode !== 'radio' || !player.current) return;
     if (player.refilling) return player.refillPromise;
-    if (!force && player.queue.length >= 2) return;
+    // Keep the five visible "Up next" slots full after every switch.  A
+    // shorter threshold leaves 2-4 tracks on screen once a queued track has
+    // been played or tapped.
+    if (!force && player.queue.length >= QUEUE_VISIBLE) return;
     player.refilling = true;
     const run = (async () => {
       const seed = player.queue.length ? player.queue[player.queue.length - 1] : player.current;
