@@ -306,11 +306,11 @@ Appears above the bottom bar once a track is loaded. Height: `--mini-h` (64 px).
 
 ```
 ┌─────────────────────────┐
-│  ⌄                    ⋯ │  ← chevron close, or swipe down
+│                        ⌄ │  ← chevron close, or swipe down
 │  ┌─────────────────┐    │
 │  │    Artwork      │    │  ← 240×240, rounded 16px
 │  └─────────────────┘    │
-│  Title              ♡   │  ← favorite toggle
+│  Title          ♡   ⋯    │  ← favorite toggle + track actions
 │  Artist                 │
 │  ━━━━━━●────────────    │  ← draggable range input
 │  1:23              3:45 │
@@ -323,17 +323,18 @@ Appears above the bottom bar once a track is loaded. Height: `--mini-h` (64 px).
 └─────────────────────────┘
 ```
 
-- `⋯` in the top-right opens current-track actions: **Trim playback** and
-  **Add to playlist**. It does not offer **Play next** for the current track
-  or duplicate the favorite action.
+- `⋯` beside the track title, to the right of the heart, opens current-track
+  actions: **Trim playback** and **Add to playlist**. It does not offer **Play
+  next** for the current track or duplicate the favorite action.
 - `♡` beside the track title adds the current track to Favorites; the same
   heart filled with the accent colour removes it and syncs with every other
   visible heart. The heart has no circular background: the accent colour draws
   the outline, and the accent fill marks the saved state.
 - The transport row is centred and holds only Previous, Play/Pause, and Next
-  (44 px skips and a 68 px play button). The top action is 40 px and the heart
+  (44 px skips and a 68 px play button). The meta action is 40 px and the heart
   keeps a 44 px hit target.
-- Close via swipe down or the chevron button; there is no cross-style close control.
+- The close chevron sits in the top-right corner, above the artwork. Close via
+  swipe down or the chevron button; there is no cross-style close control.
 - Artwork is 240×240 px, rounded 16 px, with an accent glow.
 - Timeline is a draggable `<input type="range">` with elapsed/total labels;
   dragging updates the label immediately and seeks on release.

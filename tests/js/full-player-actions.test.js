@@ -17,13 +17,11 @@ function between(startMarker, endMarker) {
   return html.slice(start, end);
 }
 
-test('the player top row holds close and more actions', () => {
+test('the player top row keeps only the close action', () => {
   const top = between('<div class="fp-top">', '<div class="fp-art-wrap">');
-  const close = top.indexOf('id="fp-close"');
-  const more = top.indexOf('id="fp-more"');
-  assert.notStrictEqual(close, -1, 'the top row must keep the close chevron');
-  assert.notStrictEqual(more, -1, 'the top row must hold the more-actions button');
-  assert.ok(close < more, 'the more button must be the right-most top action');
+  assert.notStrictEqual(top.indexOf('id="fp-close"'), -1, 'the top row must keep the close chevron');
+  assert.doesNotMatch(top, /id="fp-more"/,
+    'the more button must leave the top row for the track meta row');
 });
 
 test('the transport row keeps only previous, play, next', () => {
@@ -46,16 +44,18 @@ test('the transport row keeps only previous, play, next', () => {
     'the favorite heart must leave the transport row');
 });
 
-test('the player heart sits beside the track title', () => {
+test('the player heart and more actions sit beside the track title', () => {
   const meta = between('<div class="fp-meta">', '<div class="fp-timeline">');
   const title = meta.indexOf('id="fp-title"');
   const artist = meta.indexOf('id="fp-artist"');
   const fav = meta.indexOf('id="fp-fav"');
+  const more = meta.indexOf('id="fp-more"');
   assert.notStrictEqual(title, -1, 'the meta row must keep the title');
   assert.notStrictEqual(artist, -1, 'the meta row must keep the artist');
   assert.notStrictEqual(fav, -1, 'the meta row must hold the favorite heart');
-  assert.ok(title < artist && artist < fav,
-    'the heart must follow the title and artist');
+  assert.notStrictEqual(more, -1, 'the meta row must hold the more button');
+  assert.ok(title < artist && artist < fav && fav < more,
+    'the heart and more actions must follow the title and artist, heart first');
 });
 
 test('renderPlayer syncs the player heart and labels the more button', () => {
@@ -104,11 +104,13 @@ test('the player menu omits Play next and favorite items', () => {
     'favorite items must be skipped for the player menu');
 });
 
-test('the top and meta rows spread their actions to the edges', () => {
-  assert.match(css, /\.fp-top \{[^}]*display: flex;[^}]*justify-content: space-between;/,
-    'the top row must push close left and more right');
-  assert.match(css, /\.fp-meta \{[^}]*display: flex;[^}]*align-items: center;[^}]*justify-content: space-between;/,
-    'the meta row must push the heart to the right of the title');
+test('the top row aligns the close to the right', () => {
+  assert.match(css, /\.fp-top \{[^}]*display: flex;[^}]*justify-content: flex-end;/,
+    'the close chevron must sit in the top-right corner');
+  assert.match(css, /\.fp-meta \{[^}]*display: flex;[^}]*align-items: center;/,
+    'the meta row must lay the text and actions out side by side');
+  assert.match(css, /\.fp-meta-actions \{[^}]*display: flex;[^}]*gap:/,
+    'the heart and more buttons must stay grouped to the right of the title');
 });
 
 test('the transport and meta buttons keep their sizes', () => {
