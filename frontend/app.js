@@ -363,6 +363,7 @@
    * opts.playlistId: for "Remove from this playlist"
    */
   function trackRow(track, opts) {
+    const duration = trimmedTrackDuration(track);
     const main = h('button', {
       class: 'track-main',
       type: 'button',
@@ -374,7 +375,7 @@
       h('span', { class: 'track-title', text: track.title || 'Untitled' }),
       h('span', { class: 'track-artist', text: track.artist || 'Unknown artist' })),
     track.kind === 'video' ? h('span', { class: 'track-badge', text: 'Video' }) : null,
-    track.duration_seconds ? h('span', { class: 'track-dur', text: fmtTime(track.duration_seconds) }) : null);
+    duration ? h('span', { class: 'track-dur', text: fmtTime(duration) }) : null);
 
     const row = h('li', { class: 'track', 'data-track': track.video_id }, main);
     if (player.current && player.current.video_id === track.video_id) row.classList.add('is-current');
@@ -487,6 +488,15 @@
     return trim.valid ? trim.end - trim.start : full;
   }
 
+  // Track rows live in several screens (search, favorites, playlists), so a
+  // saved or reset trim must redraw every visible duration label, not just
+  // the player's own timeline.
+  function refreshTrimDurations() {
+    const v = currentView();
+    if (v) renderView(v);
+    renderHome();
+  }
+
   function stopTrimPreview(session) {
     const preview = (session && session.previewAudio) || $('trim-preview');
     try { preview.pause(); } catch (_) { /* ignore */ }
@@ -529,21 +539,18 @@
     const previewBtn = h('button', { class: 'btn', type: 'button' }, icon('play'), previewLabel);
     const saveBtn = h('button', { class: 'btn btn-accent btn-block', type: 'button', text: 'Save' });
     const resetBtn = saved
-      ? h('button', { class: 'btn btn-block', type: 'button', text: 'Reset trim' })
+      ? h('button', { class: 'btn btn-block btn-danger', type: 'button', text: 'Reset trim' })
       : null;
     const cancelBtn = h('button', { class: 'btn btn-block', type: 'button', text: 'Cancel' });
 
     const session = {
       track,
-      wasPlaying: !audio.paused && !isSilent(),
+      wasPlaying: false,
       previewAudio: $('trim-preview'),
       previewStart: start,
       previewEnd: end,
     };
     state.trimPreview = session;
-    if (session.wasPlaying) {
-      try { audio.pause(); } catch (_) { /* ignore */ }
-    }
 
     let previewLoading = false;
 
@@ -568,6 +575,12 @@
       readInputs();
       const error = TrimRange.validateTrim(start, end, full);
       if (error) { hint.textContent = error; return; }
+      // Only the user asking for a preview interrupts the main player. Opening
+      // the trim sheet for another track must leave playback untouched.
+      if (!session.wasPlaying) session.wasPlaying = !audio.paused && !isSilent();
+      if (session.wasPlaying) {
+        try { audio.pause(); } catch (_) { /* ignore */ }
+      }
       stopTrimPreview(session);
       previewLoading = true;
       previewBtn.disabled = true;
@@ -611,6 +624,7 @@
         });
         state.trims.set(track.video_id, row);
         applyTrimChange(track);
+        refreshTrimDurations();
         haptic('success');
         toast('Trim saved');
         closeSheet();
@@ -628,6 +642,7 @@
           await api(`/api/trims/${encodeURIComponent(track.video_id)}`, { method: 'DELETE' });
           state.trims.delete(track.video_id);
           applyTrimChange(track);
+          refreshTrimDurations();
           toast('Trim removed');
           closeSheet();
         } catch (err) {
