@@ -24,6 +24,7 @@ Maintained by: Project Manager / Architect
 | Search-prefetch latency and log-hygiene fix (`PREFETCH-001`, `PREFETCH-002`) | Developer (fix-prefetch worktree) | Follow-up implemented, tests green; pending deploy/verification | Deploy and repeat the production-timing check | 2026-11-20 |
 | Player loading state: remove the dimmed intermediate Pause (`PLAYER-001`) | Developer (remove-pause worktree) | Merged in PR #34; manual verification pending | Verify in a real Telegram WebView; confirm spinner, no dimmed Pause, and Pause only after playback | 2026-11-21 |
 | Playback trimming — non-destructive start/end (`edit-track`) | Developer (edit-track worktree) | Merged in #41/#42; manual verification pending | Verify trim sheet, preview, trimmed progress/seek, and shared-playlist isolation in a real Telegram WebView | 2026-11-21 |
+| Full-player quick actions (`add-buttons`) | Developer | Merged in PR #49; manual verification pending | Verify in a real Telegram WebView: `♡` toggles and syncs with other hearts, `⋯` shows only Trim playback and Add to playlist for the current track, and five controls fit 320 px | 2026-11-21 |
 
 ## Known bugs
 
@@ -49,6 +50,7 @@ Maintained by: Project Manager / Architect
 
 | Date | Decision | Why | Evidence |
 |---|---|---|---|
+| 2026-11-21 | Full-screen player uses `⋯` for current-track actions and `♡` for Favorites; the player menu does not duplicate the favorite action | Keep the always-playing track's menu short: Play next is meaningless for the current track, and the heart is already a dedicated button | `frontend/index.html`, `frontend/app.js`, `tests/js/full-player-actions.test.js`, PR #49 |
 | 2026-11-21 | Playback trims are per-user metadata (`track_trims`), not media edits; playback starts at Start and advances at End, and shared playlists do not share trims | Let users cut trailing silence or pick a favourite part without downloading, copying, or re-encoding audio | `app/database.py`, `app/main.py`, `frontend/trim-range.js`, `frontend/app.js` |
 | 2026-11-21 | Favorites use heart buttons: outlined `♡` adds, filled `♥` removes; the Favorites tab and search menus follow the same state | Make the add/remove favourite action explicit and consistent across screens | `frontend/app.js`, `frontend/style.css`, `tests/js/favorite-heart.test.js`, #44/#45 |
 | 2026-11-21 | Next/previous stops the current track and warms the next one early | Avoid overlapping playback and reduce the gap before the next track | `frontend/app.js`, `tests/js/radio-skip.test.js`, #46 |
@@ -69,6 +71,7 @@ Maintained by: Project Manager / Architect
 
 | Date | Change | Commit / PR |
 |---|---|---|
+| 2026-11-21 | Full-screen player: `⋯` track actions and `♡` favorite toggle | PR #49 |
 | 2026-11-21 | Next/previous stops the current track and warms the next one early | `2bc0774` (#46) |
 | 2026-11-21 | Favorites polish: larger heart glyph and red Remove from Favorites action | `a047725` (#45) |
 | 2026-11-21 | Favorites use heart buttons: outlined `♡` to add, filled `♥` to remove | `4ca18a8` (#44) |

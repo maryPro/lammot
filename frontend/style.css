@@ -668,11 +668,20 @@ body.has-mini .app {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: var(--spacing-lg);
+  gap: var(--spacing-sm);
   padding: var(--spacing-sm) 0 var(--spacing-lg);
 }
-.fp-skip { width: 52px; height: 52px; }
-.fp-skip .icon { width: 28px; height: 28px; }
+.fp-action,
+.fp-fav {
+  width: 40px;
+  height: 40px;
+  flex: none;
+}
+.fp-action { color: var(--text-secondary); }
+.fp-action .icon { width: 20px; height: 20px; }
+.fp-fav .icon { width: 22px; height: 22px; }
+.fp-skip { width: 44px; height: 44px; }
+.fp-skip .icon { width: 24px; height: 24px; }
 .fp-play {
   width: 68px;
   height: 68px;

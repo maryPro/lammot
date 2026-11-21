@@ -313,7 +313,7 @@ Appears above the bottom bar once a track is loaded. Height: `--mini-h` (64 px).
 │  Artist                 │
 │  ━━━━━━●────────────    │  ← draggable range input
 │  1:23              3:45 │
-│      ⏮    ⏯    ⏭       │
+│   ⋯    ⏮    ⏯    ⏭    ♡   │
 │─────────────────────────│
 │  Up next   Radio: …     │  ← source label
 │  1. Next Track       ×  │
@@ -322,6 +322,13 @@ Appears above the bottom bar once a track is loaded. Height: `--mini-h` (64 px).
 └─────────────────────────┘
 ```
 
+- `⋯` left of Previous opens current-track actions: **Trim playback** and
+  **Add to playlist**. It does not offer **Play next** for the current track
+  or duplicate the favorite action.
+- `♡` right of Next adds the current track to Favorites; `♥` removes it and
+  syncs with every other visible heart.
+- The five controls use 40 px secondary actions, 44 px skip buttons, and a
+  68 px play button; the row fits a 320 px viewport.
 - Close via swipe down or the chevron button; there is no cross-style close control.
 - Artwork is 240×240 px, rounded 16 px, with an accent glow.
 - Timeline is a draggable `<input type="range">` with elapsed/total labels;
