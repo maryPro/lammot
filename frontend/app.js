@@ -383,7 +383,7 @@
 
     const row = h('li', { class: 'track', 'data-track': track.video_id }, main);
     if (player.current && player.current.video_id === track.video_id) row.classList.add('is-current');
-    if (opts.variant === 'search' || opts.variant === 'shared') row.append(favButton(track));
+    if (opts.variant === 'search' || opts.variant === 'shared' || opts.variant === 'favorites') row.append(favButton(track));
 
     const more = h('button', { class: 'icon-btn more-btn', type: 'button', 'aria-label': `More actions for ${track.title}` }, icon('more'));
     more.addEventListener('click', (e) => { e.stopPropagation(); openTrackMenu(track, opts); });
@@ -1040,7 +1040,7 @@
       if (!all.length) {
         return h('div', { class: 'state-msg' },
           h('strong', { text: 'No favorites yet' }),
-          'Tap + next to a song in search to save it here.');
+          'Tap ♡ next to a song in search to save it here.');
       }
       const field = h('div', { class: 'search-field filter-field' }, icon('search'));
       const input = h('input', {

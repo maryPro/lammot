@@ -42,7 +42,21 @@ test('Remove from Favorites is destructive in every track list', () => {
     'removing a favorite must stay red in search results and Favorites alike');
 });
 
-test('the favorite heart fills more of the circle', () => {
-  assert.match(css, /\.fav-btn \.icon \{\s*width: 20px;\s*height: 20px;/,
-    'the heart inside the favorite button must be larger than the previous 18px');
+test('the favorite heart has no circular background', () => {
+  const rule = css.match(/\.fav-btn \{([^}]*)\}/);
+  assert.notStrictEqual(rule, null, '.fav-btn must be styled');
+  assert.match(rule[1], /background:\s*none;/, 'the heart button must not paint a filled circle');
+  assert.match(rule[1], /color:\s*var\(--accent\);/, 'the heart contour must follow the accent color');
+  assert.doesNotMatch(css, /\.fav-btn\.is-fav \{[^}]*background:/,
+    'the saved state must not switch the button background');
+});
+
+test('the Favorites screen rows keep a fillable heart', () => {
+  assert.match(app, /opts\.variant === 'search' \|\| opts\.variant === 'shared' \|\| opts\.variant === 'favorites'/,
+    'Favorites rows must show the same heart so saved tracks can be unliked there');
+});
+
+test('the favorite heart is large enough to read without a background', () => {
+  assert.match(css, /\.fav-btn \.icon \{\s*width: 24px;\s*height: 24px;/,
+    'the outline heart needs a larger glyph now that the circle is gone');
 });
