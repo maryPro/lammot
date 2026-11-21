@@ -143,12 +143,11 @@ Silver, and Matrix Green, white text on dark accents.
 ┌─────────────────────────┐
 │  🔍 Zemfira          ×  │
 │─────────────────────────│
-│ [thumb] Title       [♡] │  ← favorite button
-│         Artist      ⋯   │  ← more actions
-│         3:45            │
+│ [thumb] Title   3:45 [＋] ⋯ │  ← add; saved rows show ✓
+│         Artist             │
 │─────────────────────────│
-│ [thumb] Title       [♥] │  ← already in Favorites
-│         Artist      ⋯   │
+│ [thumb] Title   3:45  ♥  ⋯ │  ← other lists use a heart
+│         Artist             │
 └─────────────────────────┘
 ```
 
@@ -156,30 +155,33 @@ Track card:
 
 - Thumbnail: 48×48 px, rounded 8 px; a music note placeholder if the image fails.
 - Title: 14 px bold, one line, truncated.
-- Artist: 12 px secondary color, one line, truncated. It is a sibling of the
-  playable row, not nested inside it. When the track has an `artist_id`, the
+- Artist: 12 px secondary color, one line, truncated. It sits directly under
+  the title inside the same text block. When the track has an `artist_id`, the
   artist name is a tappable link that opens the artist page; otherwise it is
   plain text.
+- The cover, the two-line text block, the duration and the actions share one
+  vertical centre line. The title and artist are separated by a 2 px gap.
 - Duration: 12 px secondary color, tabular numerals, right-aligned when known.
-- The main row (thumbnail, title, badge, duration) starts playback.
-- The artist line sits on a second row directly below the title, left-aligned
-  under the cover. The heart button occupies the second column across both
-  rows, and `⋯` occupies the third column across both rows, so a 320 px screen
-  still fits both controls.
-- Extended results show a compact `Video` badge immediately to the left of the
-  duration; song rows have no badge.
-- Search, favorites, shared-playlist and album rows show the favorite button: an
-  accent-coloured outlined `♡` (no filled circle) to add, the same heart filled
-  with the accent colour when the track is already saved.
+- A full-width play target sits behind the row content. Tapping the cover,
+  title, badge or duration starts playback; the artist link and the two action
+  buttons stay above it.
+- The right side lays out duration, the favourite control and `⋯` with equal
+  spacing so a 320 px screen still fits all three without bunching.
+- Search rows show a filled accent circular `＋` to add a track; it switches
+  to an accent `✓` once the track is saved. Favorites, shared-playlist, album
+  and artist rows use the borderless outlined `♡` / filled `♥` instead.
 - Tapping a filled heart removes the track from Favorites and returns the
   button to the outlined state.
+- Extended results show a compact `Video` badge immediately to the left of the
+  duration; song rows have no badge.
 - The `⋯` more-actions button opens a sheet:
   - **Play next** — only when a track is already loaded.
   - **Trim playback** — opens the trim sheet for this track.
   - **Add to playlist** — opens the playlist picker, including “New playlist…”.
   - **Remove from Favorites** (filled heart) — shown when the track is saved.
   - **Add to Favorites** (outlined heart) — shown for shared-playlist and
-    playlist rows, but not for search or album rows (the visible heart covers it).
+    playlist rows, but not for search, artist or album rows (the visible
+    control covers it).
   - **Remove from this playlist** — only in the playlist screen, marked danger.
 - The currently playing row gets an accent ring around its thumbnail.
 - The results list is labelled `Song results` or `Extended video results`.
@@ -226,12 +228,11 @@ Track card:
 
 ```
 ┌─────────────────────────┐
-│ ←  Zemfira          ▶   │  ← back; Play is disabled with no popular songs
 │        (avatar)         │  ← 132px round artist image
-│        Zemfira          │
+│        Zemfira          │  ← artist name appears once, as the hero title
 │─────────────────────────│
 │  Popular                │
-│ [thumb] Title       ⋯   │  ← up to 5 tracks
+│ [thumb] Title  3:45 ♡ ⋯ │  ← up to 5 tracks
 │         Zemfira         │
 │─────────────────────────│
 │  Albums                 │
@@ -244,10 +245,11 @@ Track card:
 
 - Opened from a search artist card, an artist name in a track row, or the
   artist name in the full-screen player.
-- The header title and hero name use the server's artist name; before loading,
-  the header falls back to the name passed by the caller.
-- **Popular** lists up to 5 tracks. Tapping a row plays the list in order; the
-  header **Play** button starts the same list and is disabled when it is empty.
+- The artist page has no second in-app header: Telegram's system BackButton
+  returns to the previous screen, and the artist name appears only once as the
+  large hero title under the avatar. The small header Play button is removed.
+- **Popular** lists up to 5 tracks. Tapping a row plays the list in order.
+  Each row shows its duration, favourite heart and `⋯` menu with equal spacing.
 - **Albums** and **Singles and EPs** are horizontal shelves of square covers.
   Each card shows the title and a `Type • Year` line. Empty shelves are hidden.
 - Tapping an album card pushes the Album screen.
@@ -301,7 +303,7 @@ Track card:
   track from Favorites. They also keep the `⋯` menu.
 - Playback uses list mode: next track in the filtered list, no radio, and it
   stops after the last track.
-- Empty state: “No favorites yet — Tap ♡ next to a song in search to save it
+- Empty state: “No favorites yet — Tap + next to a song in search to save it
   here.”
 - A filter with no matches shows “No songs match your search.”
 
@@ -529,7 +531,8 @@ the previous screen; search keeps its query, tab and results.
 
 ### Adding to Favorites
 
-- Tap the outlined `♡` on a search or shared-playlist row.
+- Tap the circular `+` on a search row, or the outlined `♡` on a
+  shared-playlist row.
 - The UI updates optimistically with light haptic feedback (`impactOccurred('light')`).
 - On API failure the change is rolled back and a toast shows the error.
 - Tap the filled `♥` to remove the track from Favorites; the same optimistic
