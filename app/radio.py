@@ -62,6 +62,11 @@ def _artist_name(track: dict) -> str:
     return name or track.get("channel") or "Unknown Artist"
 
 
+def _artist_id(track: dict) -> Optional[str]:
+    artists = track.get("artists") or []
+    return artists[0].get("id") if artists else None
+
+
 def _video_allowed(track: dict, duration_seconds: int) -> bool:
     if duration_seconds <= 0:
         return False
@@ -102,7 +107,13 @@ def get_radio_queue(
     seen_ids: set[str] = set()
     recent_artists: list[str] = []
 
-    def add(track: dict, t_vid: str, artist_name: str, duration_seconds: int) -> None:
+    def add(
+        track: dict,
+        t_vid: str,
+        artist_name: str,
+        artist_id: Optional[str],
+        duration_seconds: int,
+    ) -> None:
         thumbnails = track.get("thumbnail") or []
         thumbnail_url = thumbnails[-1].get("url", "") if thumbnails else ""
         queue.append(
@@ -110,20 +121,21 @@ def get_radio_queue(
                 "video_id": t_vid,
                 "title": track.get("title") or "Unknown Title",
                 "artist": artist_name,
+                "artist_id": None if is_video else artist_id,
                 "duration_seconds": duration_seconds,
                 "thumbnail_url": thumbnail_url,
             }
         )
         seen_ids.add(t_vid)
 
-    def candidate(track: dict) -> tuple[str, str, int] | None:
+    def candidate(track: dict) -> tuple[str, str, Optional[str], int] | None:
         t_vid = track.get("videoId")
         if not t_vid or t_vid in skip_ids or t_vid in seen_ids:
             return None
         duration_seconds = _parse_duration(track.get("length"))
         if is_video and not _video_allowed(track, duration_seconds):
             return None
-        return t_vid, _artist_name(track), duration_seconds
+        return t_vid, _artist_name(track), _artist_id(track), duration_seconds
 
     # Первый проход: фильтр разнообразия
     for track in tracks:
@@ -133,12 +145,12 @@ def get_radio_queue(
         found = candidate(track)
         if found is None:
             continue
-        t_vid, artist_name, duration_seconds = found
+        t_vid, artist_name, artist_id, duration_seconds = found
 
         if artist_name in recent_artists:
             continue
 
-        add(track, t_vid, artist_name, duration_seconds)
+        add(track, t_vid, artist_name, artist_id, duration_seconds)
 
         recent_artists.append(artist_name)
         if len(recent_artists) > _DIVERSITY_WINDOW:

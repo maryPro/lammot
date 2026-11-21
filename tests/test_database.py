@@ -146,6 +146,75 @@ async def test_shared_playlist_is_read_only_view(temp_db):
     assert await temp_db.get_shared_playlist("unknown-token-1234567") is None
 
 
+# ---------------------------------------------------------------- artist ids
+async def test_artist_id_round_trips_in_favorites_and_playlists(temp_db):
+    await _user(temp_db, A)
+    artist_id = "UCaaaaaaaa1"
+    await temp_db.add_favorite(
+        A, "aaaaaaaaaaa", "T", "Ar", 200, None, artist_id=artist_id
+    )
+    favs = await temp_db.get_favorites(A)
+    assert favs[0]["artist_id"] == artist_id
+
+    pl = await temp_db.create_playlist(A, "With artist")
+    await temp_db.add_track_to_playlist(
+        A, pl["id"], "aaaaaaaaaaa", "T", "Ar", 200, None, artist_id=artist_id
+    )
+    tracks = await temp_db.get_playlist_tracks(A, pl["id"])
+    assert tracks[0]["artist_id"] == artist_id
+
+    shared = await temp_db.get_shared_playlist(pl["share_token"])
+    assert shared["tracks"][0]["artist_id"] == artist_id
+
+
+async def test_init_db_migrates_old_tables_to_artist_id(tmp_path, monkeypatch):
+    import aiosqlite
+
+    path = tmp_path / "old.db"
+    monkeypatch.setenv("DATABASE_PATH", str(path))
+    async with aiosqlite.connect(path) as db:
+        await db.executescript(
+            """
+            CREATE TABLE favorites (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_user_id INTEGER NOT NULL,
+                track_id TEXT NOT NULL,
+                title TEXT,
+                artist TEXT,
+                duration INTEGER,
+                thumbnail_url TEXT,
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(telegram_user_id, track_id)
+            );
+            CREATE TABLE playlist_tracks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                playlist_id INTEGER NOT NULL,
+                track_id TEXT NOT NULL,
+                title TEXT,
+                artist TEXT,
+                duration INTEGER,
+                thumbnail_url TEXT,
+                position INTEGER NOT NULL,
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(playlist_id, track_id)
+            );
+            """
+        )
+        await db.commit()
+
+    from app import database
+
+    await database.init_db()
+    await database.init_db()  # a second startup must be a no-op
+
+    async with database._connect() as db:
+        favorites = await database._fetchall(db, "PRAGMA table_info(favorites)", ())
+        playlist_tracks = await database._fetchall(db, "PRAGMA table_info(playlist_tracks)", ())
+
+    assert "artist_id" in [column["name"] for column in favorites]
+    assert "artist_id" in [column["name"] for column in playlist_tracks]
+
+
 # ------------------------------------------------------------------- trims
 async def test_trim_table_exists(temp_db):
     async with temp_db._connect() as db:

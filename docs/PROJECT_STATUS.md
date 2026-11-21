@@ -1,7 +1,7 @@
 # Lammot — Project Status
 
 Last updated: 2026-11-21
-Verified against: `main @ 121eb22`
+Verified against: `artist` worktree (artist profile feature)
 Maintained by: Project Manager / Architect
 
 > Read this first for current state. Use [ARCHITECTURE.md](../ARCHITECTURE.md)
@@ -11,6 +11,9 @@ Maintained by: Project Manager / Architect
 
 ## Current focus
 
+- Artist profile, discography and artist links: the Artists shelf in Songs,
+  artist pages (Popular / Albums / Singles and EPs), album screens, and
+  tappable artist names in track rows and the full-screen player.
 - Production verification of recently merged playback work: trimming
   (#41/#42), favourite hearts (#44/#45), next/previous behavior (#46),
   Extended search (#38/#39), and the player loading state (#34).
@@ -19,6 +22,7 @@ Maintained by: Project Manager / Architect
 
 | Task | Owner | State | Next step | Updated |
 |---|---|---|---|---|
+| Artist profile, discography and links (`artist`) | Developer | Implemented, non-integration tests green; pending merge/manual verification | Verify the Artists shelf, artist and album screens, artist links, Back behavior and the `artist_id` migration in a real Telegram WebView; confirm the second open of an artist logs `cache=hit` | 2026-11-21 |
 | Extended search production verification | PM/Developer | Merged in #38/#39; manual verification pending | Search `kirman lost` in production; confirm the 9:29 remix is playable, the `Video` badge is visible, video radio works, and long videos stay out of the queue; then close | 2026-11-21 |
 | Cold-start fast path (`cold-start`) | Developer (cold-start worktree) | Implemented, tests green; pending deploy/verification | Deploy and compare `resolve_ms`; watch player-cache reuse and prune logs | 2026-11-20 |
 | Search-prefetch latency and log-hygiene fix (`PREFETCH-001`, `PREFETCH-002`) | Developer (fix-prefetch worktree) | Follow-up implemented, tests green; pending deploy/verification | Deploy and repeat the production-timing check | 2026-11-20 |
@@ -45,11 +49,15 @@ Maintained by: Project Manager / Architect
 | The fast pass may use muxed itag 18 when audio-only is gated | Playback starts immediately, but it relays a 360p MP4 with AAC instead of audio-only 251/140, using more bandwidth and a lower audio bitrate | Keep the `_MAX_AVAILABILITY_WAIT` trade-off; use a PO token provider if audio-only without a gate becomes available | 2026-11-20 |
 | The preprocessed player cache is ~4.4 MB per player version | Without rotation it would fill the 434 MB volume | `_cleanup_player_cache()` keeps the newest 3 files; watch volume usage and `pruned` logs | 2026-11-20 |
 | Parallel prefetch is off in production (`SEARCH_PREFETCH_PARALLEL=0`) | Enabling it makes three prefetches compete; the tapped first result can wait 6.6 s + gate instead of ~2-3 s | Keep it off; consider a staggered prefetch that starts the first result alone | 2026-11-20 |
+| Favorites and playlist rows saved before `artist_id` existed have no artist link | Their artist names stay plain text until the track is saved again; shared playlists expose `artist_id` only for rows that have it | Accept for now; new saves and all new search/radio/album tracks carry links | 2026-11-21 |
+| Artist metadata is not prefetched and is cached in-process only | A cold artist/album page costs one ytmusicapi request; a restart empties the cache | Keep the 5 min / 15 min / 1 h TTLs; add prefetch only if production latency shows a need | 2026-11-21 |
 
 ## Recent decisions
 
 | Date | Decision | Why | Evidence |
 |---|---|---|---|
+| 2026-11-21 | Tracks gain an optional `artist_id` (YouTube Music browse id); it is persisted only in `favorites` and `playlist_tracks`, with an idempotent `ALTER TABLE` migration. Artist metadata comes only from ytmusicapi; no second provider or new dependency | Make artist names tappable without duplicating search, and keep old databases compatible | `app/artist.py`, `app/search.py`, `app/database.py`, `tests/test_artist.py`, `tests/test_database.py` |
+| 2026-11-21 | Songs search issues `/api/search` and `/api/artists` in parallel with one abort controller; an artist failure hides only the shelf | The artist shelf must never slow down or break song results | `frontend/app.js`, `frontend/artist-view.js` |
 | 2026-11-21 | Favorite hearts are borderless accent glyphs everywhere: the accent draws the outline and the accent fill marks the saved state. Favorites rows show the filled heart to unlike. In the full-screen player the close chevron stays in the top-right, `♡` and `⋯` sit together beside the track title, and the centred bottom row holds only Previous, Play/Pause, and Next | Keep the heart readable against wallpapers and cards without an extra circle, keep transport controls the loudest element in the player, and keep the close where the user expects it | `frontend/index.html`, `frontend/style.css`, `frontend/app.js`, `tests/js/favorite-heart.test.js`, `tests/js/full-player-actions.test.js` |
 | 2026-11-21 | Playback trims are per-user metadata (`track_trims`), not media edits; playback starts at Start and advances at End, and shared playlists do not share trims | Let users cut trailing silence or pick a favourite part without downloading, copying, or re-encoding audio | `app/database.py`, `app/main.py`, `frontend/trim-range.js`, `frontend/app.js` |
 | 2026-11-21 | Favorites use heart buttons: outlined `♡` adds, filled `♥` removes; the Favorites tab and search menus follow the same state | Make the add/remove favourite action explicit and consistent across screens | `frontend/app.js`, `frontend/style.css`, `tests/js/favorite-heart.test.js`, #44/#45 |
@@ -71,6 +79,7 @@ Maintained by: Project Manager / Architect
 
 | Date | Change | Commit / PR |
 |---|---|---|
+| 2026-11-21 | Artist profile, discography and artist links (`artist` worktree) | (pending PR) |
 | 2026-11-21 | Full-screen player: `⋯` track actions and `♡` favorite toggle | PR #49 |
 | 2026-11-21 | Next/previous stops the current track and warms the next one early | `2bc0774` (#46) |
 | 2026-11-21 | Favorites polish: larger heart glyph and red Remove from Favorites action | `a047725` (#45) |
@@ -85,6 +94,11 @@ Maintained by: Project Manager / Architect
 
 ## Next up
 
+- Manually verify the artist feature: `Земфира` in Songs shows up to 3 artists,
+  Extended shows no shelf, artist and album screens load with empty shelves
+  hidden, artist names in rows and the player open the profile, Back keeps the
+  search intact, album Play stops after the last track, and the second open of
+  an artist logs `cache=hit`.
 - Manually verify playback trimming in a real Telegram WebView: set Start/End,
   preview stops at End, progress/seek use the trimmed length, the next track
   starts at End, Reset restores the full track, shared playlists do not expose

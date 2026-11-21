@@ -2,38 +2,88 @@
 tests/test_search.py — Sprint 1: Search Module Tests
 LammotBot Telegram Mini App Music Player
 
+Integration tests hit the real YouTube Music API (network required). The
+unit tests below them mock the client, so they run in the normal suite.
+
 Run with:
     pytest tests/test_search.py -v
-Skip (offline / CI):
+Skip network tests (offline / CI):
     pytest -m "not integration"
-
-These are integration tests that hit the real YouTube Music API.
-Requires network access and ytmusicapi installed in the venv.
-
-pytest -v               → verbose, shows each test name
-pytest -v -s            → also prints any print() statements
-pytest --tb=short       → shorter tracebacks on failures
 """
+
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from app.search import search_songs
-
-pytestmark = pytest.mark.integration
 
 
 # ---------------------------------------------------------------------------
 # Required fields every result must expose
 # ---------------------------------------------------------------------------
 
-REQUIRED_KEYS = {"video_id", "title", "artist", "duration_seconds", "thumbnail_url"}
+REQUIRED_KEYS = {
+    "video_id",
+    "title",
+    "artist",
+    "artist_id",
+    "duration_seconds",
+    "thumbnail_url",
+}
 
 
 # ---------------------------------------------------------------------------
-# Test 1 — English query: search by artist + title
-# Verifies: non-empty results, all required keys present, video_id is valid.
+# Unit tests (no network)
 # ---------------------------------------------------------------------------
 
+def _client_returning(items):
+    client = MagicMock()
+    client.search.return_value = items
+    return client
+
+
+def _song(**overrides):
+    item = {
+        "videoId": "aaaaaaaaaaa",
+        "title": "Wonderwall",
+        "artists": [{"name": "Oasis", "id": "UCmMUZbaYdNH0bEd1PAlAqsA"}],
+        "duration": "4:18",
+        "thumbnails": [{"url": "https://i.ytimg.com/vi/x/hq.jpg"}],
+    }
+    item.update(overrides)
+    return item
+
+
+def test_song_result_includes_artist_id():
+    client = _client_returning([_song()])
+    with patch("app.search._get_client", return_value=client):
+        results = search_songs("Oasis", limit=1)
+
+    assert results[0]["artist_id"] == "UCmMUZbaYdNH0bEd1PAlAqsA"
+
+
+def test_song_without_artist_id_gets_none():
+    client = _client_returning([_song(artists=[{"name": "Oasis"}])])
+    with patch("app.search._get_client", return_value=client):
+        results = search_songs("Oasis", limit=1)
+
+    assert results[0]["artist_id"] is None
+
+
+def test_song_without_artists_gets_none():
+    client = _client_returning([_song(artists=[])])
+    with patch("app.search._get_client", return_value=client):
+        results = search_songs("Oasis", limit=1)
+
+    assert results[0]["artist"] == ""
+    assert results[0]["artist_id"] is None
+
+
+# ---------------------------------------------------------------------------
+# Integration tests (real API)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.integration
 def test_english_query_structure():
     """
     English query returns at least one result with all required fields.
@@ -60,13 +110,11 @@ def test_english_query_structure():
         "title must be a non-empty string"
     )
 
+    # artist_id is either a channel id or None
+    assert first["artist_id"] is None or isinstance(first["artist_id"], str)
 
-# ---------------------------------------------------------------------------
-# Test 2 — Cyrillic query: search by artist name only
-# Verifies: duration > 0, thumbnail_url starts with https://.
-# A bare artist query ("Земфира") must surface popular songs, not an error.
-# ---------------------------------------------------------------------------
 
+@pytest.mark.integration
 def test_cyrillic_artist_only_query():
     """
     Russian-language artist-only query returns valid tracks.
@@ -93,12 +141,7 @@ def test_cyrillic_artist_only_query():
         )
 
 
-# ---------------------------------------------------------------------------
-# Test 3 — Cyrillic query: search by track title only
-# Verifies: limit is respected, results contain the queried word in some field.
-# "Воскресенье" is a track title that should return ≤ 3 results when limit=3.
-# ---------------------------------------------------------------------------
-
+@pytest.mark.integration
 def test_title_only_query_respects_limit():
     """
     Track-title-only query respects the limit parameter.

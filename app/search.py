@@ -41,6 +41,11 @@ def _get_client() -> YTMusic:
     return _ytmusic
 
 
+def get_client() -> YTMusic:
+    """Public wrapper around the shared client, used by app.artist."""
+    return _get_client()
+
+
 # ---------------------------------------------------------------------------
 # Duration helpers
 # ---------------------------------------------------------------------------
@@ -109,6 +114,7 @@ def search_songs(query: str, limit: int = 10) -> list[dict]:
           - video_id        (str)  — YouTube video ID, always 11 characters
           - title           (str)  — track title
           - artist          (str)  — primary artist name
+          - artist_id       (str|None) — artist channel browse id
           - duration_seconds(int)  — track length in seconds (0 if unknown)
           - thumbnail_url   (str)  — HTTPS URL of the best-resolution thumbnail
 
@@ -152,6 +158,7 @@ def search_songs(query: str, limit: int = 10) -> list[dict]:
             # artists is a list of dicts: [{"id": ..., "name": "Земфира"}, ...]
             artists_raw: list[dict] = item.get("artists") or []
             artist: str = artists_raw[0].get("name", "") if artists_raw else ""
+            artist_id: Optional[str] = artists_raw[0].get("id") if artists_raw else None
 
             # duration is a formatted string like "3:45"
             duration_seconds: int = _parse_duration(item.get("duration"))
@@ -163,6 +170,7 @@ def search_songs(query: str, limit: int = 10) -> list[dict]:
                     "video_id": video_id,
                     "title": title,
                     "artist": artist,
+                    "artist_id": artist_id or None,
                     "duration_seconds": duration_seconds,
                     "thumbnail_url": thumbnail_url,
                 }
@@ -240,6 +248,7 @@ def search_videos(query: str, limit: int = 10) -> list[dict]:
                     "video_id": video_id,
                     "title": item.get("title") or "",
                     "artist": _video_artist(item),
+                    "artist_id": None,
                     "duration_seconds": duration_seconds,
                     "thumbnail_url": _best_thumbnail(
                         item.get("thumbnails") or item.get("thumbnail")

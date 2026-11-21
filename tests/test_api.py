@@ -29,6 +29,7 @@ TRACK = {
     "video_id": VID,
     "title": "Test Track",
     "artist": "Test Artist",
+    "artist_id": "UCtestartist123",
     "duration_seconds": 213,
     "thumbnail_url": "https://i.ytimg.com/vi/x/hq.jpg",
 }
@@ -60,6 +61,7 @@ def other_headers():
 async def client(temp_db):
     main.search_limiter.reset()
     main.stream_limiter.reset()
+    main.artist_limiter.reset()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         yield ac
 
@@ -170,6 +172,103 @@ async def test_search_prefetch_receives_filtered_video_results(client, headers):
     prefetcher.enqueue_results.assert_called_once_with(
         fake, "aac", owner=123456, request_key=hashlib.sha256(b"x").hexdigest()[:10]
     )
+
+
+# ------------------------------------------------------------------- artists
+ARTIST_ID = "UCmMUZbaYdNH0bEd1PAlAqsA"
+ALBUM_ID = "MPREb_AYetWMZunqA"
+ARTIST_CARD = {
+    "browse_id": ARTIST_ID,
+    "name": "Oasis",
+    "thumbnail_url": "https://i.ytimg.com/artist.jpg",
+}
+ARTIST_PAGE = {
+    "artist": ARTIST_CARD,
+    "popular": [TRACK],
+    "albums": [],
+    "singles": [],
+}
+ALBUM_PAGE = {
+    "album": {
+        "browse_id": ALBUM_ID,
+        "title": "Morning Glory",
+        "artist": "Oasis",
+        "artist_id": ARTIST_ID,
+        "year": "1995",
+        "type": "Album",
+        "thumbnail_url": "https://i.ytimg.com/cover.jpg",
+    },
+    "tracks": [TRACK],
+}
+
+
+@pytest.mark.parametrize(
+    "path",
+    [f"/api/artists?q=Oasis", f"/api/artists/{ARTIST_ID}", f"/api/albums/{ALBUM_ID}"],
+)
+async def test_artist_endpoints_require_auth(client, path):
+    assert (await client.get(path)).status_code == 401
+
+
+async def test_artist_search_endpoint_shape(client, headers):
+    with patch("app.main.artist.search_artists", return_value=[ARTIST_CARD]) as m:
+        r = await client.get("/api/artists?q=Oasis&limit=3", headers=headers)
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "data": [ARTIST_CARD]}
+    assert m.call_args.args == ("Oasis", 3)
+    assert isinstance(m.call_args.kwargs["stats"], dict)
+
+
+async def test_artist_page_endpoint_shape(client, headers):
+    with patch("app.main.artist.get_artist_page", return_value=ARTIST_PAGE) as m:
+        r = await client.get(f"/api/artists/{ARTIST_ID}", headers=headers)
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "data": ARTIST_PAGE}
+    assert m.call_args.args == (ARTIST_ID,)
+    assert isinstance(m.call_args.kwargs["stats"], dict)
+
+
+async def test_album_page_endpoint_shape(client, headers):
+    with patch("app.main.artist.get_album_page", return_value=ALBUM_PAGE) as m:
+        r = await client.get(f"/api/albums/{ALBUM_ID}", headers=headers)
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "data": ALBUM_PAGE}
+    assert m.call_args.args == (ALBUM_ID,)
+
+
+@pytest.mark.parametrize("path", ["/api/artists/short", "/api/albums/bad"])
+async def test_artist_endpoints_reject_invalid_browse_id(client, headers, path):
+    with patch("app.main.artist.get_artist_page") as artist_page, \
+         patch("app.main.artist.get_album_page") as album_page:
+        r = await client.get(path, headers=headers)
+    assert r.status_code == 422
+    artist_page.assert_not_called()
+    album_page.assert_not_called()
+
+
+async def test_artist_endpoints_hide_upstream_errors(client, headers):
+    failing = [f"/api/artists/{ARTIST_ID}", f"/api/albums/{ALBUM_ID}"]
+    with patch("app.main.artist.get_artist_page", side_effect=Exception("secret")), \
+         patch("app.main.artist.get_album_page", side_effect=Exception("secret")):
+        for path in failing:
+            r = await client.get(path, headers=headers)
+            assert r.status_code == 502
+            assert "secret" not in r.text
+    with patch("app.main.artist.search_artists", side_effect=Exception("secret")):
+        r = await client.get("/api/artists?q=x", headers=headers)
+    assert r.status_code == 502
+    assert "secret" not in r.text
+
+
+async def test_artist_page_404_for_malformed_artist(client, headers):
+    from app import artist as artist_module
+
+    with patch(
+        "app.main.artist.get_artist_page",
+        side_effect=artist_module.ArtistNotFoundError(ARTIST_ID),
+    ):
+        r = await client.get(f"/api/artists/{ARTIST_ID}", headers=headers)
+    assert r.status_code == 404
 
 
 # ------------------------------------------------------------------- stream
@@ -426,6 +525,26 @@ async def test_favorite_rejects_non_https_thumbnail(client, headers):
     bad = {**TRACK, "thumbnail_url": "javascript:alert(1)"}
     r = await client.post("/api/favorites", headers=headers, json=bad)
     assert r.status_code == 422
+
+
+async def test_artist_id_survives_favorites_and_playlist_add(client, headers):
+    await client.post("/api/favorites", headers=headers, json=TRACK)
+    favorites = (await client.get("/api/favorites", headers=headers)).json()["data"]
+    assert favorites[0]["artist_id"] == TRACK["artist_id"]
+
+    pl = (await client.post("/api/playlists", headers=headers, json={"name": "A"})).json()["data"]
+    await client.post(f"/api/playlists/{pl['id']}/tracks", headers=headers, json=TRACK)
+    tracks = (await client.get(f"/api/playlists/{pl['id']}", headers=headers)).json()["data"]["tracks"]
+    assert tracks[0]["artist_id"] == TRACK["artist_id"]
+    shared = (await client.get(f"/api/playlists/shared/{pl['share_token']}")).json()["data"]
+    assert shared["tracks"][0]["artist_id"] == TRACK["artist_id"]
+
+
+async def test_track_without_artist_id_returns_null(client, headers):
+    legacy = {key: value for key, value in TRACK.items() if key != "artist_id"}
+    await client.post("/api/favorites", headers=headers, json=legacy)
+    favorites = (await client.get("/api/favorites", headers=headers)).json()["data"]
+    assert favorites[0]["artist_id"] is None
 
 
 # ------------------------------------------------------------------ history

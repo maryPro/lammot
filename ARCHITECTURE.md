@@ -39,9 +39,17 @@ Key behaviors spread across backend and client:
   it asks for up to 25 raw results, then keeps only items with an 11-character
   id, a known duration inside 45–900 s, and no live/upcoming flag. Exactly
   15:00 is included; unknown durations are dropped. Video results carry
-  `"kind": "video"`; song results may omit `kind` and the client treats a
-  missing `kind` as a song. A malformed item is skipped, but upstream
-  ytmusicapi errors propagate so `/api/search` can answer 502.
+  `"kind": "video"` and `artist_id: null`; song results may omit `kind` and the
+  client treats a missing `kind` as a song. A malformed item is skipped, but
+  upstream ytmusicapi errors propagate so `/api/search` can answer 502.
+- **Artists, artist pages and albums** — `app/artist.py` wraps three more
+  ytmusicapi calls: `search_artists()` (`filter="artists"`, up to 5 cards),
+  `get_artist_page()` (Popular, Albums, Singles and EPs) and
+  `get_album_page()` (album header + ordered tracks). The Songs tab now issues
+  `/api/search` and `/api/artists` in parallel with one abort controller; an
+  artist failure only hides the shelf and never fails the song results.
+  Malformed pages become 404, upstream failures 502, and every response is
+  cached in-process (5 min / 15 min / 1 h).
 - **Background prefetch of search results** — after `/api/search` answers,
   `app/prefetch.py` resolves the top 3 results in the background so a tap hits
   a warm resolver cache. A newer search from the same user supersedes older
@@ -75,6 +83,7 @@ lammot/
 │   ├── auth.py          # Telegram initData verification, signed audio links
 │   ├── bot.py           # Bot API: setWebhook, menu button, /start reply, /cookies parsing
 │   ├── search.py        # ytmusicapi search: official songs + Extended videos
+│   ├── artist.py        # ytmusicapi artist search, artist pages, album pages + TTL cache
 │   ├── resolver.py      # yt-dlp stream resolver: format choice, gate race, cookies,
 │   │                    #   concurrency limits, resolver state
 │   ├── cache.py         # In-memory TTL cache for stream URLs and headers
@@ -89,11 +98,14 @@ lammot/
 │   ├── audio-format.js  # Pure Opus/AAC choice, loaded before app.js
 │   ├── search-query.js  # Pure submit rules (explicit-submit search)
 │   ├── search-tabs.js   # Pure Songs/Extended tab rules
+│   ├── artist-view.js   # Pure artist/album view models, loaded before app.js
 │   ├── trim-range.js    # Pure trim math: clamping, progress, seek, end detection
 │   └── player-time.js   # Pure duration/progress helpers (iOS normalization)
 ├── tests/
 │   ├── conftest.py
 │   ├── test_api.py
+│   ├── test_artist.py
+│   ├── test_artist_view.py        # Runs tests/js/artist-view.test.js + source checks
 │   ├── test_auth.py
 │   ├── test_bot.py
 │   ├── test_database.py
@@ -278,18 +290,23 @@ Source: `ytmusicapi.get_watch_playlist(videoId=...)`.
 The user id is **never** in the URL: it always comes from verified initData.
 Success responses use the standard envelope `{"ok": true, "data": ...}`.
 Tracks always have one shape:
-`video_id, title, artist, duration_seconds, thumbnail_url`.
+`video_id, title, artist, artist_id, duration_seconds, thumbnail_url`.
+`artist_id` is the YouTube Music artist browse id, or `null` when the source
+has no artist channel (all Extended videos).
 
 | Method | Endpoint | Auth | Description |
 |---|---|---|---|
 | `GET` | `/api/me` | ✓ | Current user + `share_base` URL for share links |
 | `DELETE` | `/api/me?confirm=true` | ✓ | Delete all of the user's data (204) |
 | `GET` | `/api/search?q=...&limit=10&format=opus\|aac&type=songs\|videos` | ✓ | Search songs (default) or Extended videos (rate limit 60/min). Video results are filtered to 45–900 s and carry `kind="video"`. `format` selects the prefetch warm-up format; `limit` is 1–25, default 10 |
+| `GET` | `/api/artists?q=...&limit=3` | ✓ | Artist shelf cards `{browse_id, name, thumbnail_url}` (rate limit 60/min). `limit` is 1–5, default 3; empty result is `[]`; cached 5 min |
+| `GET` | `/api/artists/{browse_id}` | ✓ | Artist page `{artist, popular[5], albums[10], singles[10]}`. Empty shelves are `[]`; malformed page 404; cached 15 min |
+| `GET` | `/api/albums/{browse_id}` | ✓ | Album page `{album, tracks}` in release order; malformed page 404; cached 1 h |
 | `GET` | `/api/stream/{video_id}?format=opus\|aac&prefetch=1` | ✓ | Resolve and return a signed `/audio/...` link (60/min). `prefetch=1` marks a background warm-up |
 | `GET` | `/audio/{video_id}?t=...` | signed link | Audio relay with Range support (not in OpenAPI schema) |
 | `GET` | `/api/radio/{video_id}?exclude=...&limit=5&kind=song\|video` | ✓ | Next radio tracks; up to 50 exclude ids, limit 1–20, default 5. `kind=video` filters the queue to 45–900 s videos |
 | `GET` | `/api/favorites` | ✓ | User's favorites, newest first |
-| `POST` | `/api/favorites` | ✓ | Add track `{video_id, title, artist, duration_seconds, thumbnail_url}` |
+| `POST` | `/api/favorites` | ✓ | Add track `{video_id, title, artist, artist_id, duration_seconds, thumbnail_url}` |
 | `DELETE` | `/api/favorites/{video_id}` | ✓ | Remove from favorites |
 | `GET` | `/api/trims` | ✓ | All playback trims of the user: `[{video_id, start_seconds, end_seconds}]` |
 | `PUT` | `/api/trims/{video_id}` | ✓ | Save `{start_seconds, end_seconds}` (null end = full track); rejects inverted or sub-1-second ranges |
@@ -354,6 +371,12 @@ Retention: the newest 50 searches and 200 plays are kept per user; older rows
 are deleted in the same transaction as the insert. Users can clear history or
 delete all their data from Settings.
 
+`init_db()` is idempotent. After creating missing tables it checks
+`PRAGMA table_info(favorites)` and `PRAGMA table_info(playlist_tracks)` and
+adds an `artist_id TEXT` column with `ALTER TABLE` only when it is absent, so
+existing production databases migrate on startup and repeated starts are a
+no-op. Old rows keep `artist_id = NULL` until the track is saved again.
+
 ```sql
 CREATE TABLE users (
     telegram_user_id INTEGER PRIMARY KEY,
@@ -371,6 +394,7 @@ CREATE TABLE favorites (
     artist TEXT,
     duration INTEGER,              -- API maps this to duration_seconds
     thumbnail_url TEXT,
+    artist_id TEXT,                -- NULL for tracks saved before this column existed
     added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(telegram_user_id, track_id)
 );
@@ -395,6 +419,7 @@ CREATE TABLE playlist_tracks (
     artist TEXT,
     duration INTEGER,
     thumbnail_url TEXT,
+    artist_id TEXT,
     position INTEGER NOT NULL,
     added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(playlist_id, track_id)
@@ -479,6 +504,13 @@ The working cache is an in-memory TTL dict. No Redis.
 - Per-key resolver locks prevent duplicate extractions for the same key.
 - One process only (single uvicorn worker), so the cache, resolver state and
   rate limiter are consistent.
+
+`app/artist.py` keeps a second in-process TTL cache for YouTube Music metadata:
+dict + `threading.Lock`, max 512 entries, lazy expiry. Keys are
+`artist_search:<sha256(query+limit)>`, `artist:<browse_id>` and
+`album:<browse_id>`; TTLs are 5 minutes, 15 minutes and 1 hour. Artist search
+shares the existing `search_limiter` (60/min); artist and album pages share one
+`RateLimiter(limit=60)` per user. Artist metadata is never prefetched.
 
 ---
 

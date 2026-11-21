@@ -269,18 +269,24 @@
   }
 
   function trackBody(t) {
-    return {
+    const body = {
       video_id: t.video_id,
       title: (t.title || '').slice(0, 300),
       artist: (t.artist || '').slice(0, 200),
       duration_seconds: Math.max(0, Math.min(86400, Math.round(t.duration_seconds || 0))),
       thumbnail_url: safeImageUrl(t.thumbnail_url),
     };
+    if (typeof t.artist_id === 'string' && t.artist_id) {
+      body.artist_id = t.artist_id.slice(0, 64);
+    }
+    return body;
   }
 
   // ------------------------------------------------------------ app state
   const TrimRange = window.LammotTrim;
   if (!TrimRange) throw new Error('trim-range.js failed to load');
+  const ArtistView = window.LammotArtistView;
+  if (!ArtistView) throw new Error('artist-view.js failed to load');
 
   const state = {
     user: null,
@@ -291,6 +297,7 @@
     playlists: null,             // null = not loaded yet
     recent: [],
     search: { q: '', status: 'idle', results: [], error: '' },
+    searchArtists: [],           // artist cards shown above song results
     searchType: window.LammotSearchTabs
       ? window.LammotSearchTabs.normalizeTab('songs')
       : 'songs',
@@ -362,10 +369,27 @@
 
   // ------------------------------------------------------------ track rows
   /**
-   * opts.variant: 'search' | 'favorites' | 'playlist' | 'shared'
+   * opts.variant: 'search' | 'favorites' | 'playlist' | 'shared' | 'album'
    * opts.onPlay(): starts playback
    * opts.playlistId: for "Remove from this playlist"
    */
+  function trackArtistElement(track) {
+    const link = ArtistView.artistLinkModel(track);
+    if (!link.isLink) {
+      return h('span', { class: 'track-artist-static', text: link.name });
+    }
+    return h('button', {
+      class: 'track-artist-link',
+      type: 'button',
+      'aria-label': `Open ${link.name}`,
+      text: link.name,
+      onClick: (e) => {
+        e.stopPropagation();
+        openArtist(link.id, link.name);
+      },
+    });
+  }
+
   function trackRow(track, opts) {
     const duration = trimmedTrackDuration(track);
     const main = h('button', {
@@ -376,14 +400,17 @@
     },
     thumb(track.thumbnail_url),
     h('span', { class: 'track-text' },
-      h('span', { class: 'track-title', text: track.title || 'Untitled' }),
-      h('span', { class: 'track-artist', text: track.artist || 'Unknown artist' })),
+      h('span', { class: 'track-title', text: track.title || 'Untitled' })),
     track.kind === 'video' ? h('span', { class: 'track-badge', text: 'Video' }) : null,
     duration ? h('span', { class: 'track-dur', text: fmtTime(duration) }) : null);
 
-    const row = h('li', { class: 'track', 'data-track': track.video_id }, main);
+    const row = h('li', { class: 'track', 'data-track': track.video_id },
+      main, trackArtistElement(track));
     if (player.current && player.current.video_id === track.video_id) row.classList.add('is-current');
-    if (opts.variant === 'search' || opts.variant === 'shared' || opts.variant === 'favorites') row.append(favButton(track));
+    if (opts.variant === 'search' || opts.variant === 'shared'
+        || opts.variant === 'favorites' || opts.variant === 'album') {
+      row.append(favButton(track));
+    }
 
     const more = h('button', { class: 'icon-btn more-btn', type: 'button', 'aria-label': `More actions for ${track.title}` }, icon('more'));
     more.addEventListener('click', (e) => { e.stopPropagation(); openTrackMenu(track, opts); });
@@ -409,7 +436,7 @@
     if (!nowPlaying) {
       if (isFavorite(track.video_id)) {
         items.push({ label: 'Remove from Favorites', icon: 'heartFilled', danger: true, onSelect: () => removeFavorite(track) });
-      } else if (opts.variant !== 'search') {
+      } else if (opts.variant !== 'search' && opts.variant !== 'album') {
         items.push({ label: 'Add to Favorites', icon: 'heart', onSelect: () => addFavorite(track) });
       }
     }
@@ -817,6 +844,7 @@
     if (searchController) searchController.abort();
     searchSeq += 1;
     state.search = SearchQuery.idleStateForQuery(searchInput.value);
+    state.searchArtists = [];
     renderHome();
   }
 
@@ -831,17 +859,30 @@
     prefetchQueue.length = 0;  // drop warm-ups for the previous query
     searchController = new AbortController();
     state.search = { q, status: 'loading', results: [], error: '' };
+    state.searchArtists = [];
     if (remember) rememberSearch(q);
     renderHome();
-    try {
-      const type = SearchTabs.apiType(state.searchType);
-      const results = await api(`/api/search?q=${encodeURIComponent(q)}&limit=20&format=${preferredFormat}&type=${type}`, { signal: searchController.signal });
-      if (seq !== searchSeq) return;
-      state.search = { q, status: 'done', results: results || [], error: '' };
-    } catch (err) {
-      if (err && err.name === 'AbortError') return;
-      if (seq !== searchSeq) return;
-      state.search = { q, status: 'error', results: [], error: err.message };
+    const type = SearchTabs.apiType(state.searchType);
+    const wantArtists = state.searchType === 'songs';
+    const signal = searchController.signal;
+    const songsRequest = api(
+      `/api/search?q=${encodeURIComponent(q)}&limit=20&format=${preferredFormat}&type=${type}`,
+      { signal }
+    );
+    const artistsRequest = wantArtists
+      ? api(`/api/artists?q=${encodeURIComponent(q)}&limit=3`, { signal })
+      : Promise.resolve([]);
+    const [songsResult, artistsResult] = await Promise.allSettled([songsRequest, artistsRequest]);
+    if (seq !== searchSeq) return;
+    if (songsResult.status === 'rejected') {
+      if (songsResult.reason && songsResult.reason.name === 'AbortError') return;
+      state.search = { q, status: 'error', results: [], error: songsResult.reason.message };
+      state.searchArtists = [];
+    } else {
+      state.search = { q, status: 'done', results: songsResult.value || [], error: '' };
+      state.searchArtists = artistsResult.status === 'fulfilled'
+        ? ArtistView.normalizeArtistResults(artistsResult.value, 3)
+        : [];
     }
     renderHome();
   }
@@ -857,6 +898,7 @@
     const next = SearchTabs.normalizeTab(type);
     if (next === state.searchType) return;
     state.searchType = next;
+    state.searchArtists = [];
     updateSearchTabs();
     if (searchInput.disabled) return;  // outside Telegram: keep the notice
     const s = state.search;
@@ -872,6 +914,41 @@
     state.searchType = SearchTabs.normalizeTab('songs');
     onSearchInput();
     searchInput.focus();
+  }
+
+  function openArtist(artistId, name) {
+    if (!artistId) return;
+    openView('artist', { id: artistId, name: name || 'Artist' });
+  }
+
+  function artistAvatar(url) {
+    const wrap = h('span', { class: 'artist-avatar' });
+    const src = safeImageUrl(url);
+    if (src) {
+      const img = h('img', {
+        class: 'artist-avatar-img',
+        src,
+        alt: '',
+        loading: 'lazy',
+        referrerpolicy: 'no-referrer',
+      });
+      img.addEventListener('error', () => img.replaceWith(icon('music')), { once: true });
+      wrap.append(img);
+    } else {
+      wrap.append(icon('music'));
+    }
+    return wrap;
+  }
+
+  function artistShelf(artists) {
+    if (!artists || !artists.length) return null;
+    return h('section', { class: 'shelf artist-section', 'aria-label': 'Artists' },
+      h('h2', { class: 'section-label', text: 'Artists' }),
+      h('div', { class: 'shelf-scroll artist-shelf' }, artists.map((artist) => h('button', {
+        class: 'artist-card',
+        type: 'button',
+        onClick: () => openArtist(artist.browse_id, artist.name),
+      }, artistAvatar(artist.thumbnail_url), h('span', { class: 'artist-name', text: artist.name })))));
   }
 
   function renderHome() {
@@ -913,13 +990,17 @@
       return;
     }
 
+    const parts = [];
+    const shelf = state.searchType === 'songs' ? artistShelf(state.searchArtists) : null;
+    if (shelf) parts.push(shelf);
+
     if (!s.results.length) {
       if (state.searchType === 'videos') {
-        body.replaceChildren(h('div', { class: 'state-msg' },
+        parts.push(h('div', { class: 'state-msg' },
           h('strong', { text: `Nothing found for “${s.q}”` }),
           'No videos under 15:00 found. Try a different query or switch back to Songs.'));
       } else {
-        body.replaceChildren(h('div', { class: 'state-msg' },
+        parts.push(h('div', { class: 'state-msg' },
           h('strong', { text: `Nothing found for “${s.q}”` }),
           'Check the spelling or try the artist name.',
           h('br'),
@@ -930,6 +1011,7 @@
             onClick: () => setSearchType('videos'),
           })));
       }
+      body.replaceChildren(...parts);
       return;
     }
 
@@ -944,7 +1026,8 @@
           playRadio(track);
         },
       })));
-    body.replaceChildren(list);
+    parts.push(list);
+    body.replaceChildren(...parts);
   }
 
   // ------------------------------------------------------------ views (screens)
@@ -1152,6 +1235,131 @@
       ],
     }));
     return [viewHeader(current.name, count === 1 ? '1 song' : `${count} songs`, menu), body];
+  };
+
+  // --- Artist page
+  function imageTile(url, className) {
+    const wrap = h('span', { class: className });
+    const src = safeImageUrl(url);
+    if (src) {
+      const img = h('img', {
+        class: 'tile-img',
+        src,
+        alt: '',
+        loading: 'lazy',
+        referrerpolicy: 'no-referrer',
+      });
+      img.addEventListener('error', () => img.replaceWith(icon('music')), { once: true });
+      wrap.append(img);
+    } else {
+      wrap.append(icon('music'));
+    }
+    return wrap;
+  }
+
+  function albumCard(card) {
+    return h('button', {
+      class: 'album-card',
+      type: 'button',
+      onClick: () => openView('album', { id: card.browse_id, name: card.title }),
+    },
+    imageTile(card.thumbnail_url, 'album-cover'),
+    h('span', { class: 'album-title', text: card.title || 'Untitled' }),
+    h('span', { class: 'album-meta', text: ArtistView.albumMetaLine(card) }));
+  }
+
+  function albumShelf(title, cards) {
+    if (!cards || !cards.length) return null;
+    return h('section', { class: 'shelf', 'aria-label': title },
+      h('h2', { class: 'section-label', text: title }),
+      h('div', { class: 'shelf-scroll album-shelf' }, cards.map(albumCard)));
+  }
+
+  VIEW_RENDERERS.artist = (params) => {
+    const body = h('div', { class: 'screen-body' });
+    let page = null;
+
+    body.append(withData('page', () => api(`/api/artists/${encodeURIComponent(params.id)}`), (raw) => {
+      page = ArtistView.normalizeArtistPage(raw);
+      const artist = page.artist;
+      const artistName = artist.name || 'Artist';
+      const parts = [];
+
+      parts.push(h('div', { class: 'artist-hero' },
+        imageTile(artist.thumbnail_url, 'artist-hero-avatar'),
+        h('h2', { class: 'hero-title', text: artistName })));
+
+      if (page.popular.length) {
+        parts.push(h('section', { class: 'section', 'aria-label': 'Popular' },
+          h('h2', { class: 'section-label', text: 'Popular' }),
+          h('ul', { class: 'track-list' }, page.popular.map((track, i) => trackRow(track, {
+            variant: 'artist',
+            onPlay: () => playList(page.popular, i, artistName),
+          })))));
+      }
+
+      const albums = albumShelf('Albums', page.albums);
+      if (albums) parts.push(albums);
+      const singles = albumShelf('Singles and EPs', page.singles);
+      if (singles) parts.push(singles);
+
+      if (!page.popular.length && !page.albums.length && !page.singles.length) {
+        parts.push(h('p', { class: 'state-msg', text: 'Nothing to show for this artist.' }));
+      }
+      return h('div', null, parts);
+    }));
+
+    const artistName = page ? page.artist.name : (params.name || 'Artist');
+    const play = h('button', {
+      class: 'icon-btn artist-play',
+      type: 'button',
+      'aria-label': 'Play popular songs',
+      disabled: !page || !page.popular.length,
+      onClick: () => {
+        if (page && page.popular.length) {
+          playList(page.popular, 0, page.artist.name || 'Artist');
+        }
+      },
+    }, icon('play'));
+
+    return [viewHeader(artistName, null, play), body];
+  };
+
+  // --- Album page
+  VIEW_RENDERERS.album = (params) => {
+    const body = h('div', { class: 'screen-body' });
+    let page = null;
+
+    body.append(withData('page', () => api(`/api/albums/${encodeURIComponent(params.id)}`), (raw) => {
+      page = ArtistView.normalizeAlbumPage(raw);
+      const album = page.album;
+      const albumName = album.title || 'Album';
+      const actions = h('div', { class: 'btn-row' }, h('button', {
+        class: 'btn btn-accent',
+        type: 'button',
+        disabled: page.tracks.length === 0,
+        onClick: () => playList(page.tracks, 0, albumName),
+      }, icon('play'), 'Play'));
+
+      const hero = h('div', { class: 'album-hero' },
+        imageTile(album.thumbnail_url, 'album-hero-cover'),
+        h('div', { class: 'album-hero-text' },
+          h('h2', { class: 'hero-title', text: albumName }),
+          album.artist ? h('p', { class: 'hero-sub', text: album.artist }) : null,
+          h('p', { class: 'hero-meta', text: ArtistView.albumMetaLine(album) })));
+
+      const tracks = page.tracks.length
+        ? h('ul', { class: 'track-list' }, page.tracks.map((track, i) => trackRow(track, {
+          variant: 'album',
+          onPlay: () => playList(page.tracks, i, albumName),
+        })))
+        : h('p', { class: 'state-msg', text: 'No playable tracks in this album.' });
+
+      return h('div', null, hero, actions, tracks);
+    }));
+
+    const albumName = page ? page.album.title : (params.name || 'Album');
+    return [viewHeader(albumName || 'Album'), body];
   };
 
   // --- Someone else's playlist, opened from a share link (read-only)
@@ -1781,7 +1989,18 @@
     $('mini-thumb').setAttribute('referrerpolicy', 'no-referrer');
     setImage($('mini-thumb'), t.thumbnail_url);
     $('fp-title').textContent = t.title || 'Untitled';
-    $('fp-artist').textContent = t.artist || '';
+    const fpArtist = $('fp-artist');
+    fpArtist.textContent = t.artist || '';
+    const artistLink = ArtistView.artistLinkModel(t);
+    if (artistLink.isLink) {
+      fpArtist.dataset.artistId = artistLink.id;
+      fpArtist.classList.add('is-link');
+      fpArtist.disabled = false;
+    } else {
+      delete fpArtist.dataset.artistId;
+      fpArtist.classList.remove('is-link');
+      fpArtist.disabled = true;
+    }
     $('fp-art').setAttribute('referrerpolicy', 'no-referrer');
     setImage($('fp-art'), t.thumbnail_url);
     $('fp-total').textContent = fmtTime(trimmedTrackDuration(t));
@@ -2029,6 +2248,13 @@
       if (player.current) {
         openTrackMenu(player.current, { variant: 'player' });
       }
+    });
+    $('fp-artist').addEventListener('click', () => {
+      const artistId = $('fp-artist').dataset.artistId;
+      if (!artistId) return;
+      const name = $('fp-artist').textContent || 'Artist';
+      closeFullPlayer();
+      openView('artist', { id: artistId, name });
     });
     $('fp-close').addEventListener('click', closeFullPlayer);
     bindSwipeDown();
