@@ -109,8 +109,8 @@ test('the top row aligns the close to the right', () => {
     'the close chevron must sit in the top-right corner');
   assert.match(css, /\.fp-meta \{[^}]*display: flex;[^}]*align-items: center;/,
     'the meta row must lay the text and actions out side by side');
-  assert.match(css, /\.fp-meta-actions \{[^}]*display: flex;[^}]*gap:/,
-    'the heart and more buttons must stay grouped to the right of the title');
+  assert.match(css, /\.fp-meta-actions \{[^}]*display: flex;[^}]*gap: var\(--spacing-sm\);/,
+    'the heart and more buttons must stay grouped close together to the right of the title');
 });
 
 test('the transport and meta buttons keep their sizes', () => {
