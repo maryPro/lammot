@@ -399,16 +399,19 @@
   }
 
   function openTrackMenu(track, opts) {
+    const nowPlaying = opts.variant === 'player';
     const items = [];
-    if (player.current) {
+    if (player.current && !nowPlaying) {
       items.push({ label: 'Play next', icon: 'playNext', onSelect: () => playNext(track) });
     }
     items.push({ label: 'Trim playback', icon: 'scissors', onSelect: () => openTrimSheet(track) });
     items.push({ label: 'Add to playlist', icon: 'listAdd', onSelect: () => chooseTrackPlaylist(track) });
-    if (isFavorite(track.video_id)) {
-      items.push({ label: 'Remove from Favorites', icon: 'heartFilled', danger: true, onSelect: () => removeFavorite(track) });
-    } else if (opts.variant !== 'search') {
-      items.push({ label: 'Add to Favorites', icon: 'heart', onSelect: () => addFavorite(track) });
+    if (!nowPlaying) {
+      if (isFavorite(track.video_id)) {
+        items.push({ label: 'Remove from Favorites', icon: 'heartFilled', danger: true, onSelect: () => removeFavorite(track) });
+      } else if (opts.variant !== 'search') {
+        items.push({ label: 'Add to Favorites', icon: 'heart', onSelect: () => addFavorite(track) });
+      }
     }
     if (opts.variant === 'playlist' && opts.playlistId) {
       items.push({
@@ -1785,6 +1788,10 @@
     renderProgress(0, trimmedTrackDuration(t));
     renderPlayState();
     renderQueue();
+    const fav = $('fp-fav');
+    fav.dataset.fav = t.video_id;
+    setFavButton(fav, t);
+    $('fp-more').setAttribute('aria-label', `More actions for ${t.title || 'Untitled'}`);
   }
 
   function renderPlayState() {
@@ -2012,6 +2019,17 @@
     $('fp-play').addEventListener('click', togglePlay);
     $('fp-next').addEventListener('click', () => next());
     $('fp-prev').addEventListener('click', prev);
+    $('fp-fav').addEventListener('click', () => {
+      const t = player.current;
+      if (!t) return;
+      if (isFavorite(t.video_id)) removeFavorite(t);
+      else addFavorite(t, $('fp-fav'));
+    });
+    $('fp-more').addEventListener('click', () => {
+      if (player.current) {
+        openTrackMenu(player.current, { variant: 'player' });
+      }
+    });
     $('fp-close').addEventListener('click', closeFullPlayer);
     bindSwipeDown();
 
