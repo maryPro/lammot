@@ -291,25 +291,52 @@ body.has-mini .app {
 /* ------------------------------------------------------------- track rows */
 .track-list { list-style: none; margin: 0; padding: 0; }
 .track {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  position: relative;
+  display: flex;
   align-items: center;
-  column-gap: var(--spacing-xs);
+  gap: var(--spacing-sm);
+  padding: 10px 0;
   border-bottom: 1px solid var(--border);
 }
 .track:last-child { border-bottom: 0; }
 .track.is-current .thumb-wrap { box-shadow: 0 0 0 2px var(--accent); }
+
+/* The full-width play target sits behind the row content.  Text and the
+   cover pass taps through to it; the artist link and the two actions stay
+   above it. */
+.track-play {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  border-radius: 8px;
+}
+.track > .thumb-wrap,
+.track > .track-text,
+.track > .track-badge,
+.track > .track-dur {
+  position: relative;
+  z-index: 1;
+  pointer-events: none;
+}
+.track > .thumb-wrap { margin-right: var(--spacing-xs); }
+.track > .fav-btn,
+.track > .more-btn { position: relative; z-index: 2; }
+
 .track-main {
-  grid-column: 1;
-  grid-row: 1;
   min-width: 0;
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 10px 0 0;
+  padding: 8px 0;
   text-align: left;
 }
-.track-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.track-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
 .track-title,
 .track-artist {
   white-space: nowrap;
@@ -319,27 +346,20 @@ body.has-mini .app {
 .track-title { font-weight: var(--font-weight-bold); }
 .track-artist { font-size: var(--font-size-caption); color: var(--text-secondary); }
 
-.track-artist-static,
 .track-artist-link {
-  grid-column: 1;
-  grid-row: 2;
-  justify-self: start;
+  align-self: flex-start;
   max-width: 100%;
-  padding: 0 0 10px 60px;
-  font-size: var(--font-size-caption);
-  color: var(--text-secondary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  padding: 0;
+  text-align: left;
+  pointer-events: auto;
 }
-.track-artist-link { text-align: left; }
 .track-artist-link:active { color: var(--accent); }
 
 .track-dur {
+  flex: none;
   font-size: var(--font-size-caption);
   color: var(--text-secondary);
   font-variant-numeric: tabular-nums;
-  margin-left: var(--spacing-xs);
 }
 
 .thumb-wrap {
@@ -370,9 +390,16 @@ body.has-mini .app {
 }
 .fav-btn .icon { width: 24px; height: 24px; stroke-width: 2.2; }
 .fav-btn:active { transform: scale(0.92); }
+.fav-btn.fav-add {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  color: var(--on-accent);
+}
+.fav-btn.fav-add .icon { width: 18px; height: 18px; stroke-width: 2.6; }
+.fav-btn.fav-add.is-fav { background: var(--accent-soft); color: var(--accent); }
 .more-btn { width: 36px; height: 36px; color: var(--text-secondary); }
-.track > .fav-btn { grid-column: 2; grid-row: 1 / span 2; }
-.track > .more-btn { grid-column: 3; grid-row: 1 / span 2; }
 
 /* ------------------------------------------------------- artist and album */
 .shelf { padding: var(--spacing-md) 0 var(--spacing-sm); }
@@ -495,8 +522,6 @@ body.has-mini .app {
   place-items: center;
 }
 .album-hero-text { min-width: 0; }
-.artist-play { color: var(--accent); width: 40px; height: 40px; }
-.artist-play:disabled { opacity: 0.4; }
 
 /* --------------------------------------------------------------- buttons */
 .btn-row { display: flex; gap: var(--spacing-sm); padding: var(--spacing-md) 0; }

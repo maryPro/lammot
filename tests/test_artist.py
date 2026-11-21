@@ -174,6 +174,57 @@ def test_artist_page_sections_and_thumbnail_fallback():
     client.get_artist.assert_called_once_with(ARTIST_ID)
 
 
+def test_artist_page_fills_missing_popular_durations_from_the_songs_shelf():
+    raw = {
+        "name": "Oasis",
+        "thumbnails": [],
+        "songs": {
+            "browseId": "VLPLtop",
+            "results": [_track(duration="", duration_seconds=None)],
+        },
+    }
+    client = _client(
+        get_artist=raw,
+        get_playlist={"tracks": [{"videoId": "ZrOKjDZOtkA", "duration_seconds": 258}]},
+    )
+    with patch("app.artist.get_client", return_value=client):
+        page = get_artist_page(ARTIST_ID)
+
+    assert page["popular"][0]["duration_seconds"] == 258
+    client.get_playlist.assert_called_once_with("VLPLtop", limit=1)
+
+
+def test_artist_page_does_not_fetch_the_shelf_when_durations_are_known():
+    raw = {
+        "name": "Oasis",
+        "thumbnails": [],
+        "songs": {"browseId": "VLPLtop", "results": [_track()]},
+    }
+    client = _client(get_artist=raw)
+    with patch("app.artist.get_client", return_value=client):
+        get_artist_page(ARTIST_ID)
+
+    client.get_playlist.assert_not_called()
+
+
+def test_artist_page_keeps_songs_when_the_duration_shelf_fails():
+    raw = {
+        "name": "Oasis",
+        "thumbnails": [],
+        "songs": {
+            "browseId": "VLPLtop",
+            "results": [_track(duration="", duration_seconds=None)],
+        },
+    }
+    client = _client(get_artist=raw)
+    client.get_playlist.side_effect = RuntimeError("upstream failed")
+    with patch("app.artist.get_client", return_value=client):
+        page = get_artist_page(ARTIST_ID)
+
+    assert page["popular"][0]["video_id"] == "ZrOKjDZOtkA"
+    assert page["popular"][0]["duration_seconds"] == 0
+
+
 def test_artist_page_missing_sections_become_empty_lists():
     raw = {"name": "Oasis", "thumbnails": [{"url": "https://i.ytimg.com/a.jpg"}]}
     client = _client(get_artist=raw)

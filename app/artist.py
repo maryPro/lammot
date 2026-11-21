@@ -11,6 +11,8 @@ return the JSON shapes the Mini App consumes:
 Upstream ytmusicapi errors are not swallowed: they propagate so the API layer
 can return 502 instead of pretending the page is empty. Malformed or empty
 pages raise the two *NotFoundError classes, which the API maps to 404.
+The only exception is the best-effort popular-duration backfill, which degrades
+to hidden duration labels instead of failing the page.
 
 A small process-local TTL cache keeps repeated page opens cheap:
 artist search 5 min, artist page 15 min, album page 1 hour.
@@ -155,6 +157,39 @@ def _normalize_tracks(
     return tracks
 
 
+def _fill_missing_durations(tracks: List[Dict[str, Any]], playlist_id: str) -> None:
+    """Backfill popular-song durations from the artist's top-songs shelf.
+
+    YouTube Music sometimes omits the duration from the compact Popular shelf.
+    Fetching the same shelf as a playlist is a single best-effort request; a
+    failure only leaves the duration labels hidden and never fails the page.
+    """
+    if not playlist_id or not any(not track.get("duration_seconds") for track in tracks):
+        return
+    try:
+        shelf = get_client().get_playlist(playlist_id, limit=len(tracks))
+    except Exception:
+        return
+    if not isinstance(shelf, dict):
+        return
+
+    durations: Dict[str, int] = {}
+    for item in shelf.get("tracks") or []:
+        if not isinstance(item, dict):
+            continue
+        video_id = item.get("videoId") or ""
+        seconds = item.get("duration_seconds") or _parse_duration(item.get("duration"))
+        if video_id and seconds:
+            durations[video_id] = int(seconds)
+
+    for track in tracks:
+        if track.get("duration_seconds"):
+            continue
+        seconds = durations.get(track.get("video_id"))
+        if seconds:
+            track["duration_seconds"] = seconds
+
+
 def _normalize_artist_card(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not isinstance(item, dict):
         return None
@@ -260,11 +295,14 @@ def get_artist_page(
         albums = raw.get("albums") or {}
         singles = raw.get("singles") or {}
 
+        popular = _normalize_tracks(
+            songs.get("results"), POPULAR_LIMIT, artist_thumbnail, name, browse_id
+        )
+        _fill_missing_durations(popular, songs.get("browseId") or "")
+
         return {
             "artist": artist,
-            "popular": _normalize_tracks(
-                songs.get("results"), POPULAR_LIMIT, artist_thumbnail, name, browse_id
-            ),
+            "popular": popular,
             "albums": _normalize_album_cards(
                 albums.get("results"), ALBUM_SHELF_LIMIT, "Album"
             ),

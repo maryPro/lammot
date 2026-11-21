@@ -9,12 +9,16 @@ const app = fs.readFileSync(path.join(__dirname, '..', '..', 'frontend', 'app.js
 const html = fs.readFileSync(path.join(__dirname, '..', '..', 'frontend', 'index.html'), 'utf8');
 const css = fs.readFileSync(path.join(__dirname, '..', '..', 'frontend', 'style.css'), 'utf8');
 
-test('search rows show a heart instead of a plus', () => {
+test('search rows offer a plus to add and a check when saved', () => {
   assert.match(app, /heart:\s*'<path d="M12 20/, 'app.js must define an outlined heart icon');
   assert.match(app, /heartFilled:\s*'<path d="M12 20[^']*class="solid"/,
     'app.js must define a filled heart icon');
+  assert.match(app, /icon\(fav \? 'check' : 'plus'\)/,
+    'the search add button must use plus, then a check when saved');
+  assert.match(app, /favButton\(track, 'add'\)/,
+    'search rows must pass the add mode to the favorite button');
   assert.match(app, /icon\(fav \? 'heartFilled' : 'heart'\)/,
-    'the favorite button must use heartFilled when saved and heart when not');
+    'the other favorite buttons must use heartFilled when saved and heart when not');
 });
 
 test('tapping a filled heart removes the track from Favorites', () => {

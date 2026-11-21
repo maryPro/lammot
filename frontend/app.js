@@ -340,11 +340,21 @@
     }
   }
 
-  function favButton(track) {
-    const btn = h('button', { class: 'fav-btn', type: 'button', 'data-fav': track.video_id });
+  function favButton(track, mode) {
+    const add = mode === 'add';
+    const btn = h('button', {
+      class: 'fav-btn' + (add ? ' fav-add' : ''),
+      type: 'button',
+      'data-fav': track.video_id,
+      'data-fav-mode': add ? 'add' : 'toggle',
+    });
     setFavButton(btn, track);
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
+      if (add) {
+        if (!isFavorite(track.video_id)) addFavorite(track, btn);
+        return;
+      }
       if (isFavorite(track.video_id)) removeFavorite(track);
       else addFavorite(track, btn);
     });
@@ -354,6 +364,13 @@
   function setFavButton(btn, track) {
     const fav = isFavorite(track.video_id);
     btn.classList.toggle('is-fav', fav);
+    if (btn.dataset.favMode === 'add') {
+      btn.replaceChildren(icon(fav ? 'check' : 'plus'));
+      btn.setAttribute('aria-label', fav ? `${track.title} is in Favorites` : `Add ${track.title} to Favorites`);
+      btn.setAttribute('aria-pressed', fav ? 'true' : 'false');
+      btn.setAttribute('aria-disabled', fav ? 'true' : 'false');
+      return;
+    }
     btn.replaceChildren(icon(fav ? 'heartFilled' : 'heart'));
     btn.setAttribute('aria-label', fav ? `Remove ${track.title} from Favorites` : `Add ${track.title} to Favorites`);
     btn.setAttribute('aria-pressed', fav ? 'true' : 'false');
@@ -369,17 +386,17 @@
 
   // ------------------------------------------------------------ track rows
   /**
-   * opts.variant: 'search' | 'favorites' | 'playlist' | 'shared' | 'album'
+   * opts.variant: 'search' | 'favorites' | 'playlist' | 'shared' | 'artist' | 'album'
    * opts.onPlay(): starts playback
    * opts.playlistId: for "Remove from this playlist"
    */
   function trackArtistElement(track) {
     const link = ArtistView.artistLinkModel(track);
     if (!link.isLink) {
-      return h('span', { class: 'track-artist-static', text: link.name });
+      return h('span', { class: 'track-artist track-artist-static', text: link.name });
     }
     return h('button', {
-      class: 'track-artist-link',
+      class: 'track-artist track-artist-link',
       type: 'button',
       'aria-label': `Open ${link.name}`,
       text: link.name,
@@ -392,23 +409,27 @@
 
   function trackRow(track, opts) {
     const duration = trimmedTrackDuration(track);
-    const main = h('button', {
-      class: 'track-main',
+    const play = h('button', {
+      class: 'track-play',
       type: 'button',
       'aria-label': `Play ${track.title} by ${track.artist}`,
       onClick: opts.onPlay,
-    },
-    thumb(track.thumbnail_url),
-    h('span', { class: 'track-text' },
-      h('span', { class: 'track-title', text: track.title || 'Untitled' })),
-    track.kind === 'video' ? h('span', { class: 'track-badge', text: 'Video' }) : null,
-    duration ? h('span', { class: 'track-dur', text: fmtTime(duration) }) : null);
+    });
+    const text = h('span', { class: 'track-text' },
+      h('span', { class: 'track-title', text: track.title || 'Untitled' }),
+      trackArtistElement(track));
 
     const row = h('li', { class: 'track', 'data-track': track.video_id },
-      main, trackArtistElement(track));
+      play,
+      thumb(track.thumbnail_url),
+      text,
+      track.kind === 'video' ? h('span', { class: 'track-badge', text: 'Video' }) : null,
+      duration ? h('span', { class: 'track-dur', text: fmtTime(duration) }) : null);
     if (player.current && player.current.video_id === track.video_id) row.classList.add('is-current');
-    if (opts.variant === 'search' || opts.variant === 'shared'
-        || opts.variant === 'favorites' || opts.variant === 'album') {
+    if (opts.variant === 'search') {
+      row.append(favButton(track, 'add'));
+    } else if (opts.variant === 'shared' || opts.variant === 'favorites'
+        || opts.variant === 'album' || opts.variant === 'artist') {
       row.append(favButton(track));
     }
 
@@ -436,7 +457,8 @@
     if (!nowPlaying) {
       if (isFavorite(track.video_id)) {
         items.push({ label: 'Remove from Favorites', icon: 'heartFilled', danger: true, onSelect: () => removeFavorite(track) });
-      } else if (opts.variant !== 'search' && opts.variant !== 'album') {
+      } else if (opts.variant !== 'search' && opts.variant !== 'album'
+          && opts.variant !== 'artist') {
         items.push({ label: 'Add to Favorites', icon: 'heart', onSelect: () => addFavorite(track) });
       }
     }
@@ -1123,7 +1145,7 @@
       if (!all.length) {
         return h('div', { class: 'state-msg' },
           h('strong', { text: 'No favorites yet' }),
-          'Tap ♡ next to a song in search to save it here.');
+          'Tap + next to a song in search to save it here.');
       }
       const field = h('div', { class: 'search-field filter-field' }, icon('search'));
       const input = h('input', {
@@ -1277,10 +1299,9 @@
 
   VIEW_RENDERERS.artist = (params) => {
     const body = h('div', { class: 'screen-body' });
-    let page = null;
 
     body.append(withData('page', () => api(`/api/artists/${encodeURIComponent(params.id)}`), (raw) => {
-      page = ArtistView.normalizeArtistPage(raw);
+      const page = ArtistView.normalizeArtistPage(raw);
       const artist = page.artist;
       const artistName = artist.name || 'Artist';
       const parts = [];
@@ -1309,20 +1330,7 @@
       return h('div', null, parts);
     }));
 
-    const artistName = page ? page.artist.name : (params.name || 'Artist');
-    const play = h('button', {
-      class: 'icon-btn artist-play',
-      type: 'button',
-      'aria-label': 'Play popular songs',
-      disabled: !page || !page.popular.length,
-      onClick: () => {
-        if (page && page.popular.length) {
-          playList(page.popular, 0, page.artist.name || 'Artist');
-        }
-      },
-    }, icon('play'));
-
-    return [viewHeader(artistName, null, play), body];
+    return [body];
   };
 
   // --- Album page
