@@ -577,7 +577,7 @@ body.has-mini .app {
   position: relative;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   padding-top: var(--spacing-sm);
 }
 .fp-grabber {
@@ -616,6 +616,12 @@ body.has-mini .app {
   margin-bottom: var(--spacing-md);
 }
 .fp-meta-text { flex: 1; min-width: 0; }
+.fp-meta-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+  flex: none;
+}
 .fp-title {
   font-size: 18px;
   font-weight: var(--font-weight-bold);
@@ -679,7 +685,7 @@ body.has-mini .app {
   width: 40px;
   height: 40px;
   flex: none;
-  color: var(--text-secondary);
+  color: var(--text-primary);
 }
 .fp-action .icon { width: 20px; height: 20px; }
 .fp-fav { width: 44px; height: 44px; flex: none; }
