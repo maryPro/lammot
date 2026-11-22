@@ -42,6 +42,7 @@
     more: '<circle cx="5" cy="12" r="1.6" class="solid"/><circle cx="12" cy="12" r="1.6" class="solid"/><circle cx="19" cy="12" r="1.6" class="solid"/>',
     back: '<path d="M15 5l-7 7 7 7"/>',
     chevron: '<path d="M9 5l7 7-7 7"/>',
+    chevronDown: '<path d="M6 9l6 6 6-6"/>',
     clock: '<circle cx="12" cy="12" r="8"/><path d="M12 8v4.5l3 1.5"/>',
     music: '<path d="M9 18V5.5l11-2V16"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="17.5" cy="16" r="2.5"/>',
     star: '<path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.9l-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z"/>',
@@ -297,6 +298,8 @@
     recent: [],
     search: { q: '', status: 'idle', results: [], error: '' },
     searchArtists: [],           // artist cards shown above song results
+    artistIds: new Map(),        // lowercased artist name → browse_id | null
+    artistLookups: new Map(),    // lowercased artist name → in-flight Promise
     searchType: window.LammotSearchTabs
       ? window.LammotSearchTabs.normalizeTab('songs')
       : 'songs',
@@ -376,9 +379,18 @@
    * opts.onPlay(): starts playback
    * opts.playlistId: for "Remove from this playlist"
    */
-  function trackArtistElement(track) {
+  function hasUsableArtistName(track) {
+    const name = track && typeof track.artist === 'string' ? track.artist.trim() : '';
+    return Boolean(name) && name.toLowerCase() !== 'unknown artist';
+  }
+
+  function trackArtistElement(track, opts) {
     const link = ArtistView.artistLinkModel(track);
-    if (!link.isLink) {
+    const hasArtistName = hasUsableArtistName(track);
+    const canLookupName = hasArtistName && Boolean(opts && (opts.variant === 'favorites'
+      || opts.variant === 'playlist'
+      || opts.variant === 'shared'));
+    if (!link.isLink && !canLookupName) {
       return h('span', { class: 'track-artist track-artist-static', text: link.name });
     }
     return h('button', {
@@ -403,7 +415,7 @@
     });
     const text = h('span', { class: 'track-text' },
       h('span', { class: 'track-title', text: track.title || 'Untitled' }),
-      trackArtistElement(track));
+      trackArtistElement(track, opts));
 
     const row = h('li', { class: 'track', 'data-track': track.video_id },
       play,
@@ -923,8 +935,48 @@
   }
 
   function openArtist(artistId, name) {
-    if (!artistId) return;
-    openView('artist', { id: artistId, name: name || 'Artist' });
+    const artistName = name || 'Artist';
+    if (artistId) {
+      openView('artist', { id: artistId, name: artistName });
+      return;
+    }
+    openArtistByName(artistName);
+  }
+
+  // Rows saved before artist links existed (and old shared playlists) have no
+  // artist_id. The artist search endpoint gives them a profile without a
+  // database migration or a second metadata provider.
+  async function resolveArtistId(name) {
+    const key = name.trim().toLowerCase();
+    if (!key) return null;
+    if (state.artistIds.has(key)) return state.artistIds.get(key);
+    let request = state.artistLookups.get(key);
+    if (!request) {
+      request = api(`/api/artists?q=${encodeURIComponent(name.trim())}&limit=1`)
+        .then((results) => {
+          const card = ArtistView.normalizeArtistResults(results, 1)[0];
+          return { ok: true, id: card ? card.browse_id : null };
+        })
+        .catch(() => ({ ok: false, id: null }))
+        .finally(() => state.artistLookups.delete(key));
+      state.artistLookups.set(key, request);
+    }
+    const result = await request;
+    if (result.ok) state.artistIds.set(key, result.id);
+    return result.id;
+  }
+
+  async function openArtistByName(name) {
+    const query = (name || '').trim();
+    if (!query || query.toLowerCase() === 'unknown artist') return;
+    const from = currentView();
+    const artistId = await resolveArtistId(query);
+    if (currentView() !== from) return;
+    if (!artistId) {
+      toast('Artist profile not found.');
+      return;
+    }
+    openView('artist', { id: artistId, name: query });
   }
 
   function artistAvatar(url) {
@@ -1052,6 +1104,35 @@
   function goBack() {
     state.viewStack.pop();
     showCurrentView();
+  }
+
+  // The artist page behaves like a dismissible sheet: a long drag down or the
+  // top-right chevron slides it away and returns to the previous screen.
+  function closeArtistView() {
+    const v = currentView();
+    if (!v || v.name !== 'artist') {
+      goBack();
+      return;
+    }
+    const sheet = $('screen-view').querySelector('.artist-sheet');
+    if (!sheet) {
+      goBack();
+      return;
+    }
+    const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (reduce) {
+      goBack();
+      return;
+    }
+    sheet.style.transition = 'transform 0.2s ease';
+    sheet.style.transform = 'translateY(100%)';
+    setTimeout(() => {
+      const still = currentView();
+      if (!still || still.name !== 'artist') return;
+      sheet.style.transition = '';
+      sheet.style.transform = '';
+      goBack();
+    }, 200);
   }
 
   function rerenderViewIf(name) {
@@ -1314,7 +1395,16 @@
       return h('div', null, parts);
     }));
 
-    return [body];
+    return [h('div', { class: 'artist-sheet' },
+      h('div', { class: 'artist-top' },
+        h('span', { class: 'artist-grabber', 'aria-hidden': 'true' }),
+        h('button', {
+          class: 'icon-btn artist-close',
+          type: 'button',
+          'aria-label': 'Close artist profile',
+          onClick: closeArtistView,
+        }, icon('chevronDown'))),
+      body)];
   };
 
   // --- Album page
@@ -2008,12 +2098,15 @@
     const fpArtist = $('fp-artist');
     fpArtist.textContent = t.artist || '';
     const artistLink = ArtistView.artistLinkModel(t);
-    if (artistLink.isLink) {
-      fpArtist.dataset.artistId = artistLink.id;
+    if (artistLink.isLink || (hasUsableArtistName(t) && t.kind !== 'video')) {
+      if (artistLink.isLink) fpArtist.dataset.artistId = artistLink.id;
+      else delete fpArtist.dataset.artistId;
+      fpArtist.dataset.artistName = artistLink.name;
       fpArtist.classList.add('is-link');
       fpArtist.disabled = false;
     } else {
       delete fpArtist.dataset.artistId;
+      delete fpArtist.dataset.artistName;
       fpArtist.classList.remove('is-link');
       fpArtist.disabled = true;
     }
@@ -2202,6 +2295,66 @@
     });
   }
 
+  // The artist page uses the same gesture language as the player, but only
+  // from the top of the page and only for a mostly vertical drag.
+  function bindArtistSwipeDown() {
+    const screen = $('screen-view');
+    let startY = null;
+    let startX = null;
+    let dy = 0;
+    let horizontal = false;
+
+    screen.addEventListener('touchstart', (e) => {
+      const v = currentView();
+      if (!v || v.name !== 'artist') { startY = null; return; }
+      const top = window.scrollY || doc.documentElement.scrollTop || 0;
+      if (top > 0) { startY = null; return; }
+      const touch = e.touches[0];
+      if (!touch) { startY = null; return; }
+      startY = touch.clientY;
+      startX = touch.clientX;
+      dy = 0;
+      horizontal = false;
+    }, { passive: true });
+
+    screen.addEventListener('touchmove', (e) => {
+      if (startY === null) return;
+      const touch = e.touches[0];
+      if (!touch) return;
+      const deltaX = touch.clientX - startX;
+      const deltaY = touch.clientY - startY;
+      if (!horizontal && Math.abs(deltaX) > Math.abs(deltaY)) {
+        horizontal = true;
+        startY = null;
+        const sheet = screen.querySelector('.artist-sheet');
+        if (sheet) { sheet.style.transition = ''; sheet.style.transform = ''; }
+        return;
+      }
+      const sheet = screen.querySelector('.artist-sheet');
+      if (!sheet) return;
+      dy = Math.max(0, deltaY);
+      sheet.style.transition = 'none';
+      sheet.style.transform = `translateY(${dy}px)`;
+    }, { passive: true });
+
+    const finish = () => {
+      if (startY === null) return;
+      const sheet = screen.querySelector('.artist-sheet');
+      if (sheet) {
+        sheet.style.transition = '';
+        sheet.style.transform = '';
+      }
+      const shouldClose = dy > 90;
+      startY = null;
+      startX = null;
+      dy = 0;
+      horizontal = false;
+      if (shouldClose) closeArtistView();
+    };
+    screen.addEventListener('touchend', finish);
+    screen.addEventListener('touchcancel', finish);
+  }
+
   // ------------------------------------------------------------ Telegram back button
   function updateBackButton() {
     if (!tg || !tg.BackButton) return;
@@ -2266,14 +2419,16 @@
       }
     });
     $('fp-artist').addEventListener('click', () => {
-      const artistId = $('fp-artist').dataset.artistId;
-      if (!artistId) return;
-      const name = $('fp-artist').textContent || 'Artist';
+      const el = $('fp-artist');
+      const artistId = el.dataset.artistId || '';
+      const name = el.dataset.artistName || el.textContent || 'Artist';
+      if (!artistId && !name) return;
       closeFullPlayer();
-      openView('artist', { id: artistId, name });
+      openArtist(artistId, name);
     });
     $('fp-close').addEventListener('click', closeFullPlayer);
     bindSwipeDown();
+    bindArtistSwipeDown();
 
     const seek = $('fp-seek');
     seek.addEventListener('input', () => {

@@ -351,8 +351,6 @@ body.has-mini .app {
   max-width: 100%;
   padding: 0;
   text-align: left;
-  text-decoration: underline;
-  text-underline-offset: 2px;
   pointer-events: auto;
 }
 .track-artist-link:active { color: var(--accent); }
@@ -474,6 +472,27 @@ body.has-mini .app {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+.artist-sheet { position: relative; background: var(--bg-primary); }
+.artist-top {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-height: 40px;
+  padding: 0 var(--spacing-md);
+}
+.artist-grabber {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  width: 36px;
+  height: 4px;
+  margin-left: -18px;
+  border-radius: var(--radius-pill);
+  background: var(--border);
+}
+.artist-close { color: var(--text-secondary); }
 
 .artist-hero {
   display: flex;
@@ -902,7 +921,7 @@ body.has-mini .app {
   counter-increment: q;
 }
 .queue-item:last-child { border-bottom: 0; }
-.queue-item .track-main { padding: 8px 0; gap: 10px; }
+.queue-item .track-main { flex: 1; min-width: 0; padding: 8px 0; gap: 10px; }
 .queue-item .track-main::before {
   content: counter(q);
   width: 18px;
@@ -911,7 +930,7 @@ body.has-mini .app {
   color: var(--text-secondary);
   font-variant-numeric: tabular-nums;
 }
-.queue-item .icon-btn { width: 36px; height: 36px; color: var(--text-secondary); }
+.queue-item .icon-btn { flex: none; width: 36px; height: 36px; color: var(--text-secondary); }
 .queue-item .icon-btn .icon { width: 18px; height: 18px; }
 
 /* ----------------------------------------------------------------- sheets */
