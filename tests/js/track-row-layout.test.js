@@ -20,7 +20,7 @@ const trackRow = section('function trackRow(', 'function markCurrentRows(');
 const artistView = section('VIEW_RENDERERS.artist =', '// --- Album page');
 
 test('track rows keep the title and artist in one centred text block', () => {
-  assert.match(trackRow, /class: 'track-text'[\s\S]*trackArtistElement\(track\)/,
+  assert.match(trackRow, /class: 'track-text'[\s\S]*trackArtistElement\(track, opts\)/,
     'the artist must render inside the title text block');
   assert.doesNotMatch(trackRow, /main,\s*trackArtistElement\(track\)/,
     'the artist must not be a separate CSS grid row');
@@ -76,13 +76,15 @@ test('artist page rows keep a favourite heart alongside duration and menu', () =
     'the right side must read duration, favourite heart, then menu');
 });
 
-test('track artist links are underlined in every list', () => {
+test('track artist links are tappable without an underline', () => {
   const link = css.match(/\.track-artist-link \{([^}]*)\}/);
   assert.notStrictEqual(link, null, 'the artist link must be styled');
-  assert.match(link[1], /text-decoration:\s*underline;/,
-    'favorites, playlist and other rows must underline the artist link');
+  assert.doesNotMatch(link[1], /text-decoration:\s*underline;/,
+    'search, Favorites and playlist rows must not underline the artist name');
   assert.doesNotMatch(css, /\.track-artist-static[^{]*\{[^}]*text-decoration:\s*underline;/,
     'static artist text must never gain a link underline');
+  assert.match(css, /\.fp-artist\.is-link \{[^}]*text-decoration:\s*underline;/s,
+    'only the full-screen player keeps the artist underline');
   assert.match(app, /class: 'track-artist track-artist-link'/,
     'the artist link button must stay shared across every track list');
 });

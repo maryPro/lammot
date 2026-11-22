@@ -156,9 +156,12 @@ Track card:
 - Thumbnail: 48×48 px, rounded 8 px; a music note placeholder if the image fails.
 - Title: 14 px bold, one line, truncated.
 - Artist: 12 px secondary color, one line, truncated. It sits directly under
-  the title inside the same text block. When the track has an `artist_id`, the
-  artist name is an underlined tappable link that opens the artist page;
-  otherwise it is plain text with no underline.
+  the title inside the same text block. Artist names are tappable in song rows
+  and are never underlined in a track list. When the track has an
+  `artist_id`, the tap opens that artist directly. Favorites, playlist and
+  shared-playlist rows saved before `artist_id` existed resolve the artist by
+  name through the artist search endpoint, so old rows stay navigable. Rows
+  that carry neither an id nor a usable artist name remain plain text.
 - The cover, the two-line text block, the duration and the actions share one
   vertical centre line. The title and artist are separated by a 2 px gap.
 - Duration: 12 px secondary color, tabular numerals, right-aligned when known.
@@ -246,9 +249,14 @@ Track card:
 
 - Opened from a search artist card, an artist name in a track row, or the
   artist name in the full-screen player.
-- The artist page has no second in-app header: Telegram's system BackButton
+- The artist page has no second title header: Telegram's system BackButton
   returns to the previous screen, and the artist name appears only once as the
   large hero title under the avatar. The small header Play button is removed.
+- A compact top row adds the standard grabber pill and a down-chevron. Both the
+  chevron and a swipe down from the top of the page close the artist page and
+  return to the previous screen. The swipe only starts when the page is at the
+  top and the drag is mostly vertical, so shelves and page scrolling keep
+  working.
 - **Popular** lists up to 5 tracks. Tapping a row plays the list in order.
   Each row shows its duration, favourite heart and `⋯` menu with equal spacing.
 - **Albums** and **Singles and EPs** are horizontal shelves of square covers.
@@ -302,6 +310,8 @@ Track card:
 - “Search in Favorites” filters by title and artist.
 - Rows show the same filled accent heart as elsewhere; tapping it removes the
   track from Favorites. They also keep the `⋯` menu.
+- Tapping the artist name opens the artist profile, including for rows saved
+  before artist ids were stored.
 - Playback uses list mode: next track in the filtered list, no radio, and it
   stops after the last track.
 - Empty state: “No favorites yet — Tap the heart next to a song in search to
@@ -329,6 +339,8 @@ Track card:
 - Empty state: “This playlist is empty. Find a song in search, tap ⋯ and choose
   ‘Add to playlist’.”
 - Track `⋯` menu adds **Remove from this playlist**.
+- Tapping an artist name opens the artist profile, including for tracks saved
+  before artist ids were stored.
 - Deleting asks for confirmation and warns that the share link will stop
   working.
 
@@ -397,9 +409,11 @@ Appears above the bottom bar once a track is loaded. Height: `--mini-h` (64 px).
 - `⋯` beside the track title, to the right of the heart, opens current-track
   actions: **Trim playback** and **Add to playlist**. It does not offer **Play
   next** for the current track or duplicate the favorite action.
-- The artist name under the title is a button. When the current track has an
-  `artist_id`, tapping it closes the player and opens the artist page; without
-  an id it is plain, disabled text with no underline.
+- The artist name under the title is a button and is the only place where the
+  artist gets an underline. With an `artist_id`, tapping it closes the player
+  and opens that artist page. Songs from Favorites or old playlists without a
+  stored id resolve the artist by name; Extended video rows stay plain, disabled
+  text.
 - `♡` beside the track title adds the current track to Favorites; the same
   heart filled with the accent colour removes it and syncs with every other
   visible heart. The heart has no circular background: the accent colour draws
@@ -419,7 +433,8 @@ Appears above the bottom bar once a track is loaded. Height: `--mini-h` (64 px).
   trimmed segment (`0:00 … trimmed length`); seeks are clamped to that range and
   playback advances to the next track at End.
 - Queue shows 5 tracks. Items are numbered and clickable to jump to that track;
-  a remove control removes an item from the queue.
+  the remove control is pinned to the right edge of every row, so the `×`
+  column stays aligned regardless of title length.
 - Source label shows `Radio: similar songs`, `Radio: similar videos`,
   `From Favorites`, or `From <playlist>`.
 - Video seeds (`Radio: similar videos`) request video radio: the queue is
@@ -530,8 +545,9 @@ duplicate Enter for the same query that is already loading or displayed is also
 a no-op (pressing Try again after an error retries).
 
 Opening an artist or album pushes a new view. Back (the Telegram back button,
-the header back arrow, or swipe where supported) pops that view and returns to
-the previous screen; search keeps its query, tab and results.
+the header back arrow, the artist page down-chevron, a swipe down on the artist
+page, or a swipe where supported) pops that view and returns to the previous
+screen; search keeps its query, tab and results.
 
 ### Adding to Favorites
 

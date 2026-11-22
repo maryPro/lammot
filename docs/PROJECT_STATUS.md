@@ -1,7 +1,7 @@
 # Lammot — Project Status
 
-Last updated: 2026-11-21
-Verified against: `artist` worktree (artist profile feature)
+Last updated: 2026-11-22
+Verified against: `fix-bugs-artist` worktree (artist profile gestures, Up next alignment, artist links)
 Maintained by: Project Manager / Architect
 
 > Read this first for current state. Use [ARCHITECTURE.md](../ARCHITECTURE.md)
@@ -14,6 +14,9 @@ Maintained by: Project Manager / Architect
 - Artist profile, discography and artist links: the Artists shelf in Songs,
   artist pages (Popular / Albums / Singles and EPs), album screens, and
   tappable artist names in track rows and the full-screen player.
+- Artist-profile polish: swipe-down / down-chevron close with the standard
+  grabber, right-aligned remove controls in Up next, and artist navigation from
+  Favorites and playlists (including rows saved before artist ids).
 - Production verification of recently merged playback work: trimming
   (#41/#42), favourite hearts (#44/#45), next/previous behavior (#46),
   Extended search (#38/#39), and the player loading state (#34).
@@ -49,14 +52,15 @@ Maintained by: Project Manager / Architect
 | The fast pass may use muxed itag 18 when audio-only is gated | Playback starts immediately, but it relays a 360p MP4 with AAC instead of audio-only 251/140, using more bandwidth and a lower audio bitrate | Keep the `_MAX_AVAILABILITY_WAIT` trade-off; use a PO token provider if audio-only without a gate becomes available | 2026-11-20 |
 | The preprocessed player cache is ~4.4 MB per player version | Without rotation it would fill the 434 MB volume | `_cleanup_player_cache()` keeps the newest 3 files; watch volume usage and `pruned` logs | 2026-11-20 |
 | Parallel prefetch is off in production (`SEARCH_PREFETCH_PARALLEL=0`) | Enabling it makes three prefetches compete; the tapped first result can wait 6.6 s + gate instead of ~2-3 s | Keep it off; consider a staggered prefetch that starts the first result alone | 2026-11-20 |
-| Favorites and playlist rows saved before `artist_id` existed have no artist link | Their artist names stay plain text until the track is saved again; shared playlists expose `artist_id` only for rows that have it | Accept for now; new saves and all new search/radio/album tracks carry links | 2026-11-21 |
+| Favorites and playlist rows saved before `artist_id` existed resolve the artist by name through `/api/artists` when tapped | The lookup is a best-effort ytmusicapi search; a transient failure or a missing artist card shows “Artist profile not found” and is not cached, so the next tap retries | Keep the name→browse-id cache in memory; revisit a DB backfill only if lookups show up in production latency | 2026-11-22 |
 | Artist metadata is not prefetched and is cached in-process only | A cold artist/album page costs one ytmusicapi request; a restart empties the cache | Keep the 5 min / 15 min / 1 h TTLs; add prefetch only if production latency shows a need | 2026-11-21 |
 
 ## Recent decisions
 
 | Date | Decision | Why | Evidence |
 |---|---|---|---|
-| 2026-11-21 | Search rows use the borderless `♡`/`♥` again instead of the filled `＋`/`✓`; artist links are underlined in every track list; and when a track has no duration metadata on the iOS AAC relay, the doubled AVFoundation media estimate is halved | The plus read as a cross and split the favourite control from every other list; artist links looked like plain text in Favorites and playlists; the artist Popular shelf can omit durations, which let the player show 7:07 for a 3:34 track. Halving is gated on the known Apple media stack plus the AAC relay, so other platforms keep the raw media duration | `frontend/app.js`, `frontend/player-time.js`, `frontend/audio-format.js`, `frontend/style.css`, `tests/js/player-time.test.js`, `tests/js/track-row-layout.test.js`, `tests/js/favorite-heart.test.js` |
+| 2026-11-22 | The artist page closes on swipe down or a top-right down-chevron and shows the same grabber pill as the player; artist names stay tappable in lists without an underline; the player keeps the only artist underline; Up next pins `×` to the right edge | The artist page looked like a modal but only offered Telegram Back; list underlines added visual noise; unequal title lengths made the queue remove column ragged. Swipe starts only at the top of the page and only for vertical drags so shelves and scrolling keep working | `frontend/app.js`, `frontend/style.css`, `tests/js/artist-profile-ux.test.js`, `tests/js/artist-links.test.js`, `tests/js/up-next-layout.test.js` |
+| 2026-11-21 | Search rows use the borderless `♡`/`♥` again instead of the filled `＋`/`✓`; artist links were underlined in every track list (reverted on 2026-11-22); and when a track has no duration metadata on the iOS AAC relay, the doubled AVFoundation media estimate is halved | The plus read as a cross and split the favourite control from every other list; artist links looked like plain text in Favorites and playlists; the artist Popular shelf can omit durations, which let the player show 7:07 for a 3:34 track. Halving is gated on the known Apple media stack plus the AAC relay, so other platforms keep the raw media duration | `frontend/app.js`, `frontend/player-time.js`, `frontend/audio-format.js`, `frontend/style.css`, `tests/js/player-time.test.js`, `tests/js/track-row-layout.test.js`, `tests/js/favorite-heart.test.js` |
 | 2026-11-21 | Track rows use one vertically centred flex line (cover, title + artist text block, duration, actions). Search rows show a filled accent `+`/`✓`; other lists keep the borderless heart. The artist page drops the duplicate in-app header and header Play, relying on Telegram's BackButton, and backfills missing popular durations from the artist's top-songs shelf | The two-row grid and duplicate artist header broke alignment and repeated the name; the reference design expects one compact row and standard back navigation. The shelf backfill restores duration labels without failing the page when upstream omits them | `frontend/app.js`, `frontend/style.css`, `app/artist.py`, `tests/js/track-row-layout.test.js`, `tests/test_artist.py` |
 | 2026-11-21 | Tracks gain an optional `artist_id` (YouTube Music browse id); it is persisted only in `favorites` and `playlist_tracks`, with an idempotent `ALTER TABLE` migration. Artist metadata comes only from ytmusicapi; no second provider or new dependency | Make artist names tappable without duplicating search, and keep old databases compatible | `app/artist.py`, `app/search.py`, `app/database.py`, `tests/test_artist.py`, `tests/test_database.py` |
 | 2026-11-21 | Songs search issues `/api/search` and `/api/artists` in parallel with one abort controller; an artist failure hides only the shelf | The artist shelf must never slow down or break song results | `frontend/app.js`, `frontend/artist-view.js` |
@@ -81,6 +85,7 @@ Maintained by: Project Manager / Architect
 
 | Date | Change | Commit / PR |
 |---|---|---|
+| 2026-11-22 | Artist page swipe/chevron close, Up next remove alignment, and artist links in Favorites/playlists (`fix-bugs-artist` worktree) | (pending PR) |
 | 2026-11-21 | Player duration, artist-link underline, and search hearts (`fix-2-artist` worktree) | (pending PR) |
 | 2026-11-21 | Track row alignment, search `+` button, and artist page header/duration/heart fix (`fix-artist` worktree) | (pending PR) |
 | 2026-11-21 | Artist profile, discography and artist links (`artist` worktree) | (pending PR) |
