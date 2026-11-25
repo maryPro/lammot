@@ -29,9 +29,11 @@ expired ones are never handed out.
 
 yt-dlp needs a JavaScript runtime (Deno) and the yt-dlp-ejs package for
 YouTube since 2025.11 — install "yt-dlp[default]" and Deno (see README).
-Interactive taps race the combined web + web_embedded set with fallback sets:
-web usually supplies a gate-free muxed stream, while web_embedded supplies
-audio-only 251/140.  The n/sig solve is cheap after the first track because the
+Every client set pairs the fast client with ``default``: since the 2026.10
+YouTube changes, standalone ``web`` and ``web_embedded`` return only
+muxed/SABR formats and yt-dlp fails with "Requested format is not available".
+``default`` is the only client that reliably exposes audio-only 251/140 and
+the muxed 18.  The n/sig solve is cheap after the first track because the
 preprocessed player cache is persisted in YTDLP_CACHE_DIR.
 """
 
@@ -142,31 +144,32 @@ _MAX_AVAILABILITY_WAIT: float = 2.0
 # into 502s when every client response was gated.
 _MAX_TAP_GATE_WAIT: float = 5.0
 
-# Hard cap on the tap client race.  The combined web + web_embedded set and
-# the fallback sets start together; the first usable response wins.  Keep the
-# cap well above the measured cold resolve.
+# Hard cap on the tap client race.  The fast set and the fallback sets start
+# together; the first usable response wins.  Keep the cap well above the
+# measured cold resolve.
 _MAX_TAP_EXTRACT_WAIT: float = 12.0
 
-# Resolver client strategy.  A tap asks web and web_embedded in one yt-dlp
-# extraction: web contributes the muxed itag 18 that is usually gate-free, and
-# web_embedded contributes audio-only 251/140.  yt-dlp downloads the player
-# once and solves all n/sig challenges in one Deno process; the preprocessed
-# player cache makes that solve cheap after the first track for a player
-# version.  Only when this pass has no immediately usable format do we fall
-# back to the client race below.
-_FAST_CLIENTS: Tuple[str, ...] = ("web",)
+# Resolver client strategy.  Every client set must include ``default``: since
+# the 2026.10 YouTube changes, standalone ``web`` and ``web_embedded`` return
+# only muxed/SABR formats, so yt-dlp fails with "Requested format is not
+# available".  ``web`` still contributes the gate-free muxed itag 18 and stays
+# paired with ``default``; ``web_embedded`` adds client diversity in the
+# fallback sets but is never used on its own.  yt-dlp downloads the player once
+# and solves all n/sig challenges in one Deno process; the preprocessed player
+# cache makes that solve cheap after the first track for a player version.
+_FAST_CLIENTS: Tuple[str, ...] = ("web", "default")
 _DEFAULT_CLIENTS: Tuple[str, ...] = ("web_embedded", "default")
-_TAP_FAST_CLIENTS: Tuple[str, ...] = ("web", "web_embedded")
+_TAP_FAST_CLIENTS: Tuple[str, ...] = ("web", "default")
 
 # Interactive taps race these client sets as a fallback.  These clients may
-# need the n/sig challenge and Deno, so they are only started when the fast
-# pass could not produce a usable format.  The pre-roll gate is assigned per
-# player response, so a differently resolved client often returns an ungated
-# format while the first one is still gated.
+# need the n/sig challenge and Deno; the pre-roll gate is assigned per player
+# response, so a differently resolved client often returns an ungated format
+# while the first one is still gated.  No set may be a standalone ``web`` or
+# ``web_embedded``: neither exposes audio-only 251/140 anymore.
 _FAST_CLIENT_SETS: Tuple[Tuple[str, ...], ...] = (
+    _TAP_FAST_CLIENTS,
+    ("default",),
     ("web_embedded", "default"),
-    ("web",),
-    ("web_embedded",),
 )
 # Prefetch and taps both race; canary/cookie validation stay serial.
 _PARALLEL_RESOLVE = True
@@ -175,18 +178,11 @@ _PARALLEL_RESOLVE = True
 # third prefetch resolve/extract slot and one slot reserved for a user tap.
 _PREFETCH_PARALLEL = os.getenv("SEARCH_PREFETCH_PARALLEL", "0") == "1"
 
-# Prefetch tries the fast client first in both modes.  In parallel mode it then
-# moves the multi-client embedded/default set ahead of web.
-_PREFETCH_FAST_CLIENT_SETS: Tuple[Tuple[str, ...], ...] = (
-    _TAP_FAST_CLIENTS,
-    ("web_embedded", "default"),
-    ("web",),
-    ("web_embedded",),
-)
-_PREFETCH_SEQUENTIAL_CLIENT_SETS: Tuple[Tuple[str, ...], ...] = (
-    _TAP_FAST_CLIENTS,
-    *_FAST_CLIENT_SETS,
-)
+# Prefetch tries the fast client first in both modes.  The same three
+# default-bearing sets are used; parallel mode only changes how they are
+# scheduled.
+_PREFETCH_FAST_CLIENT_SETS: Tuple[Tuple[str, ...], ...] = _FAST_CLIENT_SETS
+_PREFETCH_SEQUENTIAL_CLIENT_SETS: Tuple[Tuple[str, ...], ...] = _FAST_CLIENT_SETS
 
 
 def _prefetch_client_sets() -> Tuple[Tuple[str, ...], ...]:
@@ -492,11 +488,19 @@ def _record_failure(exc: Exception) -> None:
 # ---------------------------------------------------------------------------
 
 def _configured_clients() -> Tuple[str, ...]:
-    """Player clients for the first (cheap) pass, overridable in production."""
+    """Player clients for the first (cheap) pass, overridable in production.
+
+    ``YTDLP_PLAYER_CLIENTS`` is the operational escape hatch; its recommended
+    value is ``web,default``.  A set without ``default`` gets it appended,
+    because standalone ``web``/``web_embedded`` no longer expose the
+    audio-only formats.
+    """
     raw = os.getenv("YTDLP_PLAYER_CLIENTS", "").strip()
     if raw:
         clients = tuple(c.strip() for c in raw.split(",") if c.strip())
         if clients:
+            if "default" not in clients:
+                clients = (*clients, "default")
             return clients
     return _FAST_CLIENTS
 
@@ -509,14 +513,15 @@ def _tap_fast_clients() -> Tuple[str, ...]:
 
 
 def _tap_client_sets() -> Tuple[Tuple[str, ...], ...]:
-    """Race sets for a tap: the combined fast pass plus fallbacks.
+    """Race sets for a tap: the fast pass plus the default-bearing fallbacks.
 
     The fast set is submitted first, but every set starts together.  If the
     fast set receives a gated player response, a fallback set can return an
-    ungated duplicate without waiting for the fast set to finish first.
+    ungated duplicate without waiting for the fast set to finish first.  No
+    returned set lacks ``default``.
     """
     fast = _tap_fast_clients()
-    return tuple(dict.fromkeys((fast, ("web_embedded", "default"), ("web",))))
+    return tuple(dict.fromkeys((fast, *_FAST_CLIENT_SETS)))
 
 
 def _fallback_clients() -> Tuple[str, ...]:
@@ -538,9 +543,11 @@ def _ydl_opts(
         "quiet": True,            # suppress progress output
         "no_warnings": True,      # suppress warning lines
         "skip_download": True,    # never write any file to disk
-        # No format hint: we pick itag 251/140/18 ourselves in _pick_format().
-        # Asking yt-dlp for "bestaudio" makes it fail on clients whose formats
-        # are SABR-only or missing a URL, even though other clients have them.
+        # Ask yt-dlp for every format and pick itag 251/140/18 ourselves in
+        # _pick_format().  Omitting ``format`` still makes yt-dlp run its
+        # default selector, which fails with "Requested format is not
+        # available" when the clients return only muxed/SABR formats.
+        "format": "all",
         "extractor_args": {
             "youtube": {"player_client": clients},
         },
@@ -778,8 +785,21 @@ def _extract_formats(
             with ydl_class(_ydl_opts(list(player_clients), cookiefile)) as ydl:
                 info: dict = ydl.extract_info(url, download=False)
         except yt_dlp.utils.YoutubeDLError as exc:
-            raise _classify_ytdlp_error(exc, video_id) from exc
+            error = _classify_ytdlp_error(exc, video_id)
+            logger.warning(
+                "Resolver: %s extraction failed clients=%s error=%s",
+                video_id,
+                ",".join(player_clients),
+                type(error).__name__,
+            )
+            raise error from exc
         except Exception as exc:  # network/socket errors and plugin failures
+            logger.warning(
+                "Resolver: %s extraction failed clients=%s error=%s",
+                video_id,
+                ",".join(player_clients),
+                type(exc).__name__,
+            )
             raise TransientResolveError(
                 f"yt-dlp failed for video_id={video_id!r} ({type(exc).__name__})"
             ) from exc
@@ -807,11 +827,13 @@ def _resolve_serial(
     """
     Call yt-dlp to extract audio format information for *video_id*.
 
-    The web client is tried alone first: it exposes a muxed 360p MP4
-    (itag 18) that is usually free of pre-roll gates, so playback can start
-    immediately.  Only when that pass has no format usable within
-    _MAX_AVAILABILITY_WAIT do we run one fallback pass with _DEFAULT_CLIENTS
-    to obtain the audio-only itags 140/251.
+    The fast client set (``web,default``) is tried first: ``web`` exposes the
+    muxed 360p MP4 (itag 18) that is usually free of pre-roll gates, while
+    ``default`` supplies audio-only 251/140.  Only when that pass has no format
+    usable within _MAX_AVAILABILITY_WAIT do we run one fallback pass with
+    _DEFAULT_CLIENTS (``web_embedded,default``).  Neither pass may omit
+    ``default``: standalone web/web_embedded responses no longer expose the
+    audio-only formats.
 
     Returns (CDN URL, HTTP headers to send with it).
 
@@ -825,10 +847,12 @@ def _resolve_serial(
     first_error: Optional[ResolverError] = None
     formats: list[dict] = []
     extract_calls = 0
+    format_count = 0
 
     try:
         formats = _extract_formats(video_id, clients, cookiefile)
         extract_calls += 1
+        format_count += len(formats)
     except (BotCheckError, VideoUnavailableError):
         # Both are IP/account or video-wide: another extraction cannot fix
         # them and only adds load on YouTube.
@@ -851,6 +875,7 @@ def _resolve_serial(
         try:
             extra = _extract_formats(video_id, fallback, cookiefile)
             extract_calls += 1
+            format_count += len(extra)
         except (BotCheckError, VideoUnavailableError):
             raise
         except (FormatUnavailableError, TransientResolveError) as exc:
@@ -871,12 +896,13 @@ def _resolve_serial(
         )
 
     logger.info(
-        "Resolver: %s outcome=%s clients=%s passes=%d extract_ms=%.0f "
+        "Resolver: %s outcome=%s clients=%s passes=%d formats=%d extract_ms=%.0f "
         "gate_ms=%.0f itag=%s",
         video_id,
         "ready" if _usable_now(fmt) else "gated",
         ",".join(clients),
         extract_calls,
+        format_count,
         (time.perf_counter() - started) * 1000,
         _gate_wait(fmt) * 1000,
         fmt.get("format_id"),
@@ -995,12 +1021,13 @@ def _resolve_parallel(
 
     fmt, winner = best
     logger.info(
-        "Resolver: %s outcome=%s clients=parallel(%s) passes=%d "
+        "Resolver: %s outcome=%s clients=parallel(%s) passes=%d formats=%d "
         "extract_ms=%.0f gate_ms=%.0f itag=%s",
         video_id,
         "ready" if _usable_now(fmt) else "gated",
         winner,
         extract_calls,
+        len(formats),
         (time.perf_counter() - started) * 1000,
         _gate_wait(fmt) * 1000,
         fmt.get("format_id"),
@@ -1018,11 +1045,12 @@ def _resolve_tap(
     max_gate_wait: float = _MAX_TAP_GATE_WAIT,
 ) -> Tuple[str, Dict[str, str]]:
     """
-    Race the combined fast pass with fallbacks for an interactive tap.
+    Race the fast pass with the default-bearing fallbacks for an interactive tap.
 
-    web contributes the muxed itag 18 that is usually gate-free; web_embedded
-    contributes audio-only 251/140.  yt-dlp downloads the player once and solves
-    all n/sig challenges in one Deno process, and the preprocessed player cache
+    ``web`` contributes the muxed itag 18 that is usually gate-free, while
+    ``default`` provides audio-only 251/140; ``web_embedded`` adds client
+    diversity in a fallback.  yt-dlp downloads the player once and solves all
+    n/sig challenges in one Deno process, and the preprocessed player cache
     makes that solve cheap after the first track for a player version.  The
     fallback sets start together with the fast set, so a gated fast response
     does not add its full extraction time before the retry.
@@ -1096,12 +1124,13 @@ def _resolve_prefetch(
         winner = "merged"
 
     logger.info(
-        "Resolver: %s outcome=%s clients=prefetch(%s) passes=%d "
+        "Resolver: %s outcome=%s clients=prefetch(%s) passes=%d formats=%d "
         "extract_ms=%.0f gate_ms=%.0f itag=%s",
         video_id,
         "ready" if _usable_now(fmt) else "gated",
         winner,
         extract_calls,
+        len(formats),
         (time.perf_counter() - started) * 1000,
         _gate_wait(fmt) * 1000,
         fmt.get("format_id"),

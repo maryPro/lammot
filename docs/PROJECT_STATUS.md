@@ -1,7 +1,7 @@
 # Lammot — Project Status
 
-Last updated: 2026-11-22
-Verified against: `fix-bugs-artist` worktree (artist profile gestures, Up next alignment, artist links)
+Last updated: 2026-11-25
+Verified against: `main @ dfc59ac` (2026-11-25)
 Maintained by: Project Manager / Architect
 
 > Read this first for current state. Use [ARCHITECTURE.md](../ARCHITECTURE.md)
@@ -25,13 +25,14 @@ Maintained by: Project Manager / Architect
 
 | Task | Owner | State | Next step | Updated |
 |---|---|---|---|---|
-| Artist profile, discography and links (`artist`) | Developer | Implemented, non-integration tests green; pending merge/manual verification | Verify the Artists shelf, artist and album screens, artist links, Back behavior and the `artist_id` migration in a real Telegram WebView; confirm the second open of an artist logs `cache=hit` | 2026-11-21 |
+| Artist profile, discography and links (`artist`) | Developer | Merged in #53; manual verification pending | Verify the Artists shelf, artist and album screens, artist links, Back behavior and the `artist_id` migration in a real Telegram WebView; confirm the second open of an artist logs `cache=hit` | 2026-11-21 |
 | Extended search production verification | PM/Developer | Merged in #38/#39; manual verification pending | Search `kirman lost` in production; confirm the 9:29 remix is playable, the `Video` badge is visible, video radio works, and long videos stay out of the queue; then close | 2026-11-21 |
 | Cold-start fast path (`cold-start`) | Developer (cold-start worktree) | Implemented, tests green; pending deploy/verification | Deploy and compare `resolve_ms`; watch player-cache reuse and prune logs | 2026-11-20 |
 | Search-prefetch latency and log-hygiene fix (`PREFETCH-001`, `PREFETCH-002`) | Developer (fix-prefetch worktree) | Follow-up implemented, tests green; pending deploy/verification | Deploy and repeat the production-timing check | 2026-11-20 |
 | Player loading state: remove the dimmed intermediate Pause (`PLAYER-001`) | Developer (remove-pause worktree) | Merged in PR #34; manual verification pending | Verify in a real Telegram WebView; confirm spinner, no dimmed Pause, and Pause only after playback | 2026-11-21 |
 | Playback trimming — non-destructive start/end (`edit-track`) | Developer (edit-track worktree) | Merged in #41/#42; manual verification pending | Verify trim sheet, preview, trimmed progress/seek, and shared-playlist isolation in a real Telegram WebView | 2026-11-21 |
-| Full-player quick actions and borderless hearts (`fix-player-meta-actions`) | Developer | Implemented, tests green; pending merge/manual verification | Verify in a real Telegram WebView: hearts are accent outlines with no circle and fill when saved in search, Favorites, shared playlists, and the player; the close chevron is top-right, `♡` and `⋯` sit beside the title, and the transport row holds only prev/play/next | 2026-11-21 |
+| Full-player quick actions and borderless hearts (`fix-player-meta-actions`) | Developer | Merged in #50–#52; manual verification pending | Verify in a real Telegram WebView: hearts are accent outlines with no circle and fill when saved in search, Favorites, shared playlists, and the player; the close chevron is top-right, `♡` and `⋯` sit beside the title, and the transport row holds only prev/play/next | 2026-11-21 |
+| Resolver format availability (`RESOLVER-001`) | Developer (resolver-format-fix worktree) | Implemented, non-integration tests green; pending merge/deploy verification | Merge, rebuild so yt-dlp 2026.11.23 is installed, and play the previously failing tracks on iOS (AAC) and Android (Opus); confirm `outcome=ready`, `clients=web,default`, `itag=251/140/18`, then close RESOLVER-001 | 2026-11-25 |
 
 ## Known bugs
 
@@ -39,6 +40,7 @@ Maintained by: Project Manager / Architect
 |---|---|---|---|---|---|---|
 | PREFETCH-001 | High | After a search, waiting several seconds and tapping the top result can still take ~4–11 s to start audio. The final query’s prefetch can be blocked behind a stale in-flight job, and a tap can then wait for a cold resolve that competes with background extraction for slots. | Search prefetch / resolver | Use `SEARCH_PREFETCH_ENABLED=0` as an operational fallback if prefetch makes latency worse; otherwise retry | Add a settle window; give prefetch its own 1-slot sequential extraction path; add correlation/timing logs and regression tests; verify production `api_stream resolve_ms` and `audio_relay first_chunk_ms` | 2026-11-20 |
 | PREFETCH-002 | Medium | Parallel yt-dlp extractions can truncate or rewrite the shared cookies file, producing `does not look like a Netscape format cookies file` and risking permanent cookie corruption. | Resolver / cookies | Re-upload cookies with `/cookies` if errors persist | Make extraction read-only for cookies; keep `/cookies` as the only atomic writer; add a test | 2026-11-20 |
+| RESOLVER-001 | High | Many tracks fail with `FormatUnavailableError`; `/api/stream` returns 502 (or 404 after a negative prefetch) and music does not start. Logs show repeated `Requested format is not available`; `/health` reports `last_error_class: FormatUnavailableError`; there are no bot-check errors. | Resolver / yt-dlp player clients | Set `YTDLP_PLAYER_CLIENTS=web,default` in Railway production and restart. The fast and tap passes then use a client set that exposes itags 140/251/18. | Implemented in `resolver-format-fix`: every client set now includes `default`, `_ydl_opts()` uses `format="all"`, and standalone `web`/`web_embedded` sets are gone. Deploy and verify the failing tracks, then close | 2026-11-25 |
 
 ## Known limitations / tech debt
 
@@ -59,9 +61,10 @@ Maintained by: Project Manager / Architect
 
 | Date | Decision | Why | Evidence |
 |---|---|---|---|
+| 2026-11-25 | Every resolver client set includes `default`; `web` is only used as `web,default`; `_ydl_opts()` sets `format="all"`; standalone `web`/`web_embedded` sets are gone | Production failed many tracks with `FormatUnavailableError`. Local reproduction on `rnO-MflYxCw` with yt-dlp 2026.10.26 and 2026.11.23: `web`, `web_embedded`, and `web,web_embedded` all return `Requested format is not available`, while `web,default`, `web_embedded,default`, and `default` return 43–50 formats including 140/251/18. The implicit yt-dlp selector also fails when a response has only muxed/SABR formats | `app/resolver.py`, `tests/test_resolver.py`, `ARCHITECTURE.md` |
 | 2026-11-22 | The artist page closes on swipe down or a top-right down-chevron and shows the same grabber pill as the player; artist names stay tappable in lists without an underline; the player keeps the only artist underline; Up next pins `×` to the right edge | The artist page looked like a modal but only offered Telegram Back; list underlines added visual noise; unequal title lengths made the queue remove column ragged. Swipe starts only at the top of the page and only for vertical drags so shelves and scrolling keep working | `frontend/app.js`, `frontend/style.css`, `tests/js/artist-profile-ux.test.js`, `tests/js/artist-links.test.js`, `tests/js/up-next-layout.test.js` |
 | 2026-11-21 | Search rows use the borderless `♡`/`♥` again instead of the filled `＋`/`✓`; artist links were underlined in every track list (reverted on 2026-11-22); and when a track has no duration metadata on the iOS AAC relay, the doubled AVFoundation media estimate is halved | The plus read as a cross and split the favourite control from every other list; artist links looked like plain text in Favorites and playlists; the artist Popular shelf can omit durations, which let the player show 7:07 for a 3:34 track. Halving is gated on the known Apple media stack plus the AAC relay, so other platforms keep the raw media duration | `frontend/app.js`, `frontend/player-time.js`, `frontend/audio-format.js`, `frontend/style.css`, `tests/js/player-time.test.js`, `tests/js/track-row-layout.test.js`, `tests/js/favorite-heart.test.js` |
-| 2026-11-21 | Track rows use one vertically centred flex line (cover, title + artist text block, duration, actions). Search rows show a filled accent `+`/`✓`; other lists keep the borderless heart. The artist page drops the duplicate in-app header and header Play, relying on Telegram's BackButton, and backfills missing popular durations from the artist's top-songs shelf | The two-row grid and duplicate artist header broke alignment and repeated the name; the reference design expects one compact row and standard back navigation. The shelf backfill restores duration labels without failing the page when upstream omits them | `frontend/app.js`, `frontend/style.css`, `app/artist.py`, `tests/js/track-row-layout.test.js`, `tests/test_artist.py` |
+| 2026-11-21 | Track rows use one vertically centred flex line (cover, title + artist text block, duration, actions). All track lists use the borderless `♡`/`♥` favourite control. The artist page drops the duplicate in-app header and header Play, relying on Telegram's BackButton, and backfills missing popular durations from the artist's top-songs shelf | The two-row grid and duplicate artist header broke alignment and repeated the name; the reference design expects one compact row and standard back navigation. The shelf backfill restores duration labels without failing the page when upstream omits them | `frontend/app.js`, `frontend/style.css`, `app/artist.py`, `tests/js/track-row-layout.test.js`, `tests/test_artist.py` |
 | 2026-11-21 | Tracks gain an optional `artist_id` (YouTube Music browse id); it is persisted only in `favorites` and `playlist_tracks`, with an idempotent `ALTER TABLE` migration. Artist metadata comes only from ytmusicapi; no second provider or new dependency | Make artist names tappable without duplicating search, and keep old databases compatible | `app/artist.py`, `app/search.py`, `app/database.py`, `tests/test_artist.py`, `tests/test_database.py` |
 | 2026-11-21 | Songs search issues `/api/search` and `/api/artists` in parallel with one abort controller; an artist failure hides only the shelf | The artist shelf must never slow down or break song results | `frontend/app.js`, `frontend/artist-view.js` |
 | 2026-11-21 | Favorite hearts are borderless accent glyphs everywhere: the accent draws the outline and the accent fill marks the saved state. Favorites rows show the filled heart to unlike. In the full-screen player the close chevron stays in the top-right, `♡` and `⋯` sit together beside the track title, and the centred bottom row holds only Previous, Play/Pause, and Next | Keep the heart readable against wallpapers and cards without an extra circle, keep transport controls the loudest element in the player, and keep the close where the user expects it | `frontend/index.html`, `frontend/style.css`, `frontend/app.js`, `tests/js/favorite-heart.test.js`, `tests/js/full-player-actions.test.js` |
@@ -85,10 +88,10 @@ Maintained by: Project Manager / Architect
 
 | Date | Change | Commit / PR |
 |---|---|---|
-| 2026-11-22 | Artist page swipe/chevron close, Up next remove alignment, and artist links in Favorites/playlists (`fix-bugs-artist` worktree) | (pending PR) |
-| 2026-11-21 | Player duration, artist-link underline, and search hearts (`fix-2-artist` worktree) | (pending PR) |
-| 2026-11-21 | Track row alignment, search `+` button, and artist page header/duration/heart fix (`fix-artist` worktree) | (pending PR) |
-| 2026-11-21 | Artist profile, discography and artist links (`artist` worktree) | (pending PR) |
+| 2026-11-22 | Artist page swipe/chevron close, Up next remove alignment, and artist links in Favorites/playlists (`fix-bugs-artist` worktree) | `dfc59ac` (#56) |
+| 2026-11-21 | Player duration, artist-link underline, and search hearts (`fix-2-artist` worktree) | `9d7a776` (#55) |
+| 2026-11-21 | Track row alignment, artist page header/duration/heart fix (`fix-artist` worktree) | `be275d9` (#54) |
+| 2026-11-21 | Artist profile, discography and artist links (`artist` worktree) | `d73ef59` (#53) |
 | 2026-11-21 | Full-screen player: `⋯` track actions and `♡` favorite toggle | PR #49 |
 | 2026-11-21 | Next/previous stops the current track and warms the next one early | `2bc0774` (#46) |
 | 2026-11-21 | Favorites polish: larger heart glyph and red Remove from Favorites action | `a047725` (#45) |
@@ -119,9 +122,10 @@ Maintained by: Project Manager / Architect
   9:29 remix is playable, the `Video` badge is visible, video radio works, and
   long videos stay out of the queue.
 - Consider an “Include long mixes” toggle only if users ask for it.
-- Deploy the tap-race fix and confirm `api_stream resolve_ms` is ~2–3 s for
-  `clients=parallel(web,web_embedded)` / `parallel(web)`; confirm the player
-  cache is reused and pruned on the volume.
+- Deploy the resolver format fix and confirm the previously failing tracks
+  start with `clients=parallel(web,default)` / `prefetch(web,default)`,
+  `itag=251/140/18`, and a non-zero `formats=` count; confirm the player cache
+  is reused and pruned on the volume.
 - Manually verify the merged player loading-state fix (`PLAYER-001`) in a real
   Telegram WebView (iOS/Android); confirm the spinner, no dimmed Pause, and
   Pause only after playback starts.

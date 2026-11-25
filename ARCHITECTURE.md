@@ -3,7 +3,7 @@
 **Telegram Mini App Music Player**
 Version: 1.5 | Stack: Python + FastAPI + SQLite + HTML/CSS/JS | Deploy: Docker on Railway
 
-Last verified against: `main @ 2bc0774` (2026-11-21)
+Last verified against: `main @ 9d7a776` (2026-11-21)
 Project status: [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)
 
 ---
@@ -166,14 +166,20 @@ passes it as `?format=opus|aac`.
 YouTube assigns a pre-roll gate per player response and exposes it as
 `available_at`; the CDN answers 403 before that moment. The resolver:
 
-- `_resolve_tap()` is the interactive path. It races the combined
-  `web + web_embedded` set with `("web_embedded", "default")` and `("web",)`
-  from the start. `web` contributes the muxed itag 18 that is usually
-  gate-free; `web_embedded` contributes audio-only 251/140. yt-dlp downloads
-  the player once per extraction and solves all n/sig challenges in one Deno
-  process. Format ids with an audio-track suffix (`251-0`) are matched by their
-  leading itag. `YTDLP_PLAYER_CLIENTS` overrides the fast set, which is the
-  operational escape hatch.
+- `_resolve_tap()` is the interactive path. It races the fast `web,default`
+  set with `("default",)` and `("web_embedded", "default")` from the start.
+  `web` contributes the muxed itag 18 that is usually gate-free; `default`
+  supplies audio-only 251/140. Every set must include `default`: since the
+  2026.10 YouTube changes, standalone `web` and `web_embedded` return only
+  muxed/SABR formats and fail with `Requested format is not available`.
+  yt-dlp downloads the player once per extraction and solves all n/sig
+  challenges in one Deno process. Format ids with an audio-track suffix
+  (`251-0`) are matched by their leading itag. `YTDLP_PLAYER_CLIENTS`
+  overrides the fast set (recommended `web,default`); `default` is appended
+  when the override omits it.
+- `_ydl_opts()` sets `format="all"` so yt-dlp does not run its own format
+  selector, which fails when a client response contains only muxed/SABR
+  formats. `_pick_format()` remains the only place that chooses 251 / 140 / 18.
 - The preprocessed player analysis is cached in `YTDLP_CACHE_DIR` (yt-dlp's
   `_ENABLE_PREPROCESSED_PLAYER_CACHE`). The first track for a player version
   pays the full analysis; later tracks only solve the new n/sig challenge.
@@ -189,7 +195,7 @@ YouTube assigns a pre-roll gate per player response and exposes it as
   uses itag 18 to start playback immediately.
 - `_resolve_serial()` is the serial path used by the canary and cookie
   validation (`dedicated=True`): try the configured first-pass client(s)
-  (`YTDLP_PLAYER_CLIENTS`, default `web`), then one fallback pass with
+  (`YTDLP_PLAYER_CLIENTS`, default `web,default`), then one fallback pass with
   `("web_embedded", "default")` when the first pass has no format usable within
   `_MAX_AVAILABILITY_WAIT` (2 s). Cookie validation stays on a cookie-capable
   client.
@@ -242,7 +248,7 @@ YouTube assigns a pre-roll gate per player response and exposes it as
 ### Prefetch mode
 
 `get_stream_url(..., prefetch=True)` uses the sequential prefetch path and
-starts with the same `web + web_embedded` pass, so a warm-up normally costs one
+starts with the same `web,default` fast set, so a warm-up normally costs one
 extraction and reuses the preprocessed player cache. It enters
 `_PREFETCH_GUARD` before taking a resolve slot. A tap starts its own
 interactive request instead of joining a background warm-up, so the tap never
@@ -542,8 +548,9 @@ shares the existing `search_limiter` (60/min); artist and album pages share one
 - **yt-dlp tuning** — `YTDLP_CACHE_DIR` enables the persistent preprocessed
   player cache and n/sig cache (the Dockerfile sets `/data/cache`; the resolver
   keeps the newest 3 player files). `YTDLP_PLAYER_CLIENTS` overrides the first
-  player-client chain; `BGUTIL_BASE_URL` enables a bgutil PO-token provider
-  when the plugin is installed.
+  player-client chain; the recommended value is `web,default`, and `default`
+  is appended when the override omits it. `BGUTIL_BASE_URL` enables a bgutil
+  PO-token provider when the plugin is installed.
 - **Volume move** — see [docs/eu-migration.md](docs/eu-migration.md) for the
   WAL-safe backup/restore runbook.
 

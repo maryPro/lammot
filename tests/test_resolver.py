@@ -425,8 +425,8 @@ class TestAvailabilityGate:
         assert url == _FAKE_URL_140
         sleep.assert_not_called()
 
-    def test_falls_back_to_default_when_web_is_gated(self):
-        """The web client is tried first; default is added only when it fails."""
+    def test_falls_back_to_default_when_the_fast_set_is_gated(self):
+        """The web,default pair is tried first; the fallback adds embedded."""
         now = 1_800_000_000
         gated = [{"format_id": "251", "url": _FAKE_URL_251_LATE, "available_at": now + 6}]
         ungated = [{"format_id": "251", "url": _FAKE_URL_251_EARLY}]
@@ -442,11 +442,11 @@ class TestAvailabilityGate:
             url = get_stream_url("dQw4w9WgXcQ")
 
         assert url == _FAKE_URL_251_EARLY
-        assert calls == [["web"], ["web_embedded", "default"]]
+        assert calls == [["web", "default"], ["web_embedded", "default"]]
         sleep.assert_not_called()
 
-    def test_no_fallback_pass_when_web_is_ready(self):
-        """A usable web result must not be re-resolved."""
+    def test_no_fallback_pass_when_the_fast_set_is_ready(self):
+        """A usable fast-set result must not be re-resolved."""
         calls = []
 
         def fake_ydl(opts):
@@ -457,7 +457,24 @@ class TestAvailabilityGate:
             url = get_stream_url("dQw4w9WgXcQ")
 
         assert url == _FAKE_URL_251
-        assert calls == [["web"]]
+        assert calls == [["web", "default"]]
+
+    def test_resolve_serial_falls_back_to_default_when_fast_returns_no_formats(self):
+        """An empty fast response must not stop the serial path."""
+        calls = []
+
+        def fake_extract(_video_id, clients, _cookiefile=None, **_kwargs):
+            calls.append(clients)
+            if clients == resolver._FAST_CLIENTS:
+                return []
+            return _FORMATS_BOTH
+
+        with patch("app.resolver._extract_formats", side_effect=fake_extract):
+            url, _headers = resolver._resolve_serial("dQw4w9WgXcQ", "opus")
+
+        assert url == _FAKE_URL_251
+        assert calls == [resolver._FAST_CLIENTS, resolver._DEFAULT_CLIENTS]
+        assert "default" in calls[0]
 
     def test_concurrent_calls_resolve_once(self):
         """Single-flight: concurrent prefetch + click share one extraction."""
@@ -530,22 +547,22 @@ class TestMemoryBudget:
 
 
 class TestClientOptions:
-    def test_default_pass_uses_the_web_client(self):
-        """The web client's muxed MP4 is usually free of a pre-roll gate."""
+    def test_default_pass_uses_web_and_default_clients(self):
+        """Every client set includes default for audio-only 251/140/18."""
         clients = _ydl_opts()["extractor_args"]["youtube"]["player_client"]
-        assert clients == ["web"]
+        assert clients == ["web", "default"]
 
     def test_fallback_pass_adds_the_default_client(self):
-        """Videos where the web client is gated get the embedded/default clients."""
+        """Videos where the fast set is gated get the embedded/default clients."""
         assert resolver._fallback_clients() == ("web_embedded", "default")
 
-    def test_fast_stage_uses_only_the_web_client(self):
+    def test_explicit_client_list_is_passed_through(self):
         clients = _ydl_opts(["web"])["extractor_args"]["youtube"]["player_client"]
         assert clients == ["web"]
 
-    def test_no_format_hint_is_passed_to_ytdlp(self):
-        """We select itag 251/140/18 ourselves; a format hint breaks SABR clients."""
-        assert "format" not in _ydl_opts()
+    def test_ydl_opts_requests_all_formats(self):
+        """Bypass yt-dlp's selector: _pick_format chooses 251/140/18 itself."""
+        assert _ydl_opts()["format"] == "all"
 
 
 # ---------------------------------------------------------------------------
@@ -766,15 +783,14 @@ class TestParallelResolution:
     """Interactive taps race several clients and stop at the first usable one."""
 
     @staticmethod
-    def _by_clients(web, embedded, default):
+    def _by_clients(fast, default, embedded):
         return {
-            ("web", "web_embedded"): web,
-            ("web",): web,
-            ("web_embedded",): embedded,
-            ("web_embedded", "default"): default,
+            ("web", "default"): fast,
+            ("default",): default,
+            ("web_embedded", "default"): embedded,
         }
 
-    def test_returns_an_ungated_client_when_web_is_gated(self):
+    def test_returns_an_ungated_client_when_the_fast_set_is_gated(self):
         now = 1_800_000_000
         gated = [{"format_id": "18", "url": _FAKE_URL_18, "available_at": now + 6}]
         ungated = [{"format_id": "140", "url": _FAKE_URL_140}]
@@ -800,10 +816,10 @@ class TestParallelResolution:
 
     def test_all_gated_merges_and_waits_for_the_earliest_gate(self):
         now = 1_800_000_000
-        web = [{"format_id": "18", "url": _FAKE_URL_18, "available_at": now + 8}]
-        embedded = [{"format_id": "140", "url": _FAKE_URL_140, "available_at": now + 2}]
-        default = [{"format_id": "140", "url": _FAKE_URL_140, "available_at": now + 2.5}]
-        by_clients = self._by_clients(web, embedded, default)
+        fast = [{"format_id": "18", "url": _FAKE_URL_18, "available_at": now + 8}]
+        default = [{"format_id": "140", "url": _FAKE_URL_140, "available_at": now + 2}]
+        embedded = [{"format_id": "140", "url": _FAKE_URL_140, "available_at": now + 2.5}]
+        by_clients = self._by_clients(fast, default, embedded)
 
         def fake_extract(_video_id, clients, _cookiefile=None):
             return by_clients[clients]
@@ -853,9 +869,9 @@ class TestParallelResolution:
 
     def test_race_raises_the_most_actionable_error(self):
         def fake_extract(_video_id, clients, _cookiefile=None):
-            if clients == ("web",):
+            if clients == ("default",):
                 raise resolver.FormatUnavailableError("no format")
-            if clients == ("web_embedded",):
+            if clients == ("web_embedded", "default"):
                 raise resolver.TransientResolveError("network")
             raise resolver.BotCheckError("bot check")
 
@@ -891,7 +907,7 @@ class TestParallelResolution:
         now = 1_800_000_000
         gated = [{"format_id": "18", "url": _FAKE_URL_18, "available_at": now + 4}]
         ungated = [{"format_id": "140", "url": _FAKE_URL_140}]
-        by_clients = self._by_clients(gated, gated, ungated)
+        by_clients = self._by_clients(gated, ungated, gated)
 
         def fake_extract(_video_id, clients, _cookiefile=None, **_kwargs):
             return by_clients[clients]
@@ -962,26 +978,37 @@ class TestFastClientPath:
 
         cleanup.assert_called_once()
 
-    def test_fast_client_is_a_cookie_client(self):
-        """The combined fast pass stays on cookie-capable clients."""
-        assert resolver._TAP_FAST_CLIENTS == ("web", "web_embedded")
-        assert resolver._FAST_CLIENTS == ("web",)
+    def test_every_client_set_includes_default(self):
+        """Every fast, tap, and prefetch set must expose 251/140/18."""
+        client_sets = (
+            resolver._FAST_CLIENTS,
+            resolver._DEFAULT_CLIENTS,
+            resolver._TAP_FAST_CLIENTS,
+            *resolver._FAST_CLIENT_SETS,
+            *resolver._PREFETCH_FAST_CLIENT_SETS,
+            *resolver._PREFETCH_SEQUENTIAL_CLIENT_SETS,
+            *resolver._tap_client_sets(),
+            *resolver._prefetch_client_sets(),
+        )
+
+        for clients in client_sets:
+            assert "default" in clients, clients
 
     def test_player_clients_env_overrides_the_fast_path(self, monkeypatch):
         """Operators can replace the fast client without a code change."""
-        monkeypatch.setenv("YTDLP_PLAYER_CLIENTS", "web")
+        monkeypatch.setenv("YTDLP_PLAYER_CLIENTS", "default")
 
-        assert resolver._tap_fast_clients() == ("web",)
-        assert resolver._tap_client_sets()[0] == ("web",)
-        assert resolver._prefetch_client_sets()[0] == ("web",)
+        assert resolver._tap_fast_clients() == ("default",)
+        assert resolver._tap_client_sets()[0] == ("default",)
+        assert resolver._prefetch_client_sets()[0] == ("default",)
         assert ("visionos",) not in resolver._prefetch_client_sets()
 
-    def test_tap_client_sets_start_with_the_combined_fast_client(self):
+    def test_tap_client_sets_start_with_the_fast_set(self):
         sets = resolver._tap_client_sets()
 
-        assert sets[0] == resolver._TAP_FAST_CLIENTS
+        assert sets[0] == ("web", "default")
         assert ("web_embedded", "default") in sets
-        assert ("web",) in sets
+        assert all("default" in clients for clients in sets)
 
     def test_tap_races_the_combined_fast_client_with_fallbacks(self, monkeypatch):
         monkeypatch.setattr(resolver, "_PARALLEL_RESOLVE", True)
